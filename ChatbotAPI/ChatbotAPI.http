@@ -1,0 +1,19 @@
+@UrlBase = https://localhost:7209
+
+### 1. Criar uma nova sessão (Execute este primeiro!)
+# Aqui nós definimos a personalidade da IA (o System Prompt)
+POST {{UrlBase}}/api/chat/nova-sessao
+Content-Type: application/json
+
+"Você é um leigo, responda de forma engraçada."
+
+### 2. Enviar uma mensagem
+# IMPORTANTE: Se o passo 1 te devolver algo diferente de "sessionId": 1, 
+# atualize o número do "sessionId" aqui embaixo antes de enviar!
+POST {{UrlBase}}/api/chat/enviar-mensagem
+Content-Type: application/json
+
+{
+  "sessionId": 12,
+  "texto": "Me explique o que é o Entity Framework em uma frase curta."
+}
