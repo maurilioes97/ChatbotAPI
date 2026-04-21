@@ -28,6 +28,7 @@ export const InputArea = ({ onSendMessage, isLoading }: InputAreaProps) => {
           className="flex-1 min-w-0 px-2 md:px-3 py-2 text-slate-700 placeholder:text-slate-400 bg-transparent focus:outline-none disabled:text-slate-400"
         />
 
+        {/*
         <button
           type="button"
           className="h-9 w-9 rounded-full text-slate-500 hover:bg-slate-100 flex items-center justify-center"
@@ -48,6 +49,7 @@ export const InputArea = ({ onSendMessage, isLoading }: InputAreaProps) => {
             <path d="M19 11.5a7 7 0 0 1-14 0M12 18.5V21M8 21h8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
+        */}
 
         <button
           type="submit"
