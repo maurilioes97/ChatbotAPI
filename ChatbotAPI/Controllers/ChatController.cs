@@ -69,7 +69,7 @@ namespace ChatbotAPI.Controllers
 
             // 4. Faz a chamada HTTP para a API do Gemini
             string apiKey = _configuration["GeminiApiKey"]!;
-            string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key={apiKey}";
+            string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={apiKey}";
 
             using var httpClient = new HttpClient();
             var jsonEnviado = JsonSerializer.Serialize(payload);
@@ -115,9 +115,5 @@ namespace ChatbotAPI.Controllers
         }
     }
 
-    public class MensagemRequest
-    {
-        public int SessionId { get; set; }
-        public string Texto { get; set; } = string.Empty;
-    }
+    
 }
