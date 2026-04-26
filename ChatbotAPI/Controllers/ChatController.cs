@@ -14,14 +14,14 @@ namespace ChatbotAPI.Controllers
         private readonly AppDbContext _context;
         private readonly IConfiguration _configuration;
 
-        // Injetamos o IConfiguration para conseguirmos ler a chave no appsettings.json
+        //Injetamos o IConfiguration para conseguirmos ler a chave no appsettings.json
         public ChatController(AppDbContext context, IConfiguration configuration)
         {
             _context = context;
             _configuration = configuration;
         }
 
-        [HttpPost("nova-sessao")]
+        [HttpPost("nova-sessao")] // Rota para criar sessão no banco de dados e responder para o react
         public async Task<IActionResult> CriarSessao([FromBody] string systemPrompt)
         {
             var sessao = new ChatSession { SystemPrompt = systemPrompt };
@@ -30,10 +30,10 @@ namespace ChatbotAPI.Controllers
             return Ok(new { SessionId = sessao.Id });
         }
 
-        [HttpPost("enviar-mensagem")]
+        [HttpPost("enviar-mensagem")] // Rota para enviar mensagem e receber respota do gemini
         public async Task<IActionResult> EnviarMensagem([FromBody] MensagemRequest request)
         {
-            // 1. Salva a mensagem do usuário no banco
+            //Salva a mensagem do usuário no banco
             var mensagemUsuario = new ChatMessage
             {
                 SessionId = request.SessionId,
@@ -43,31 +43,29 @@ namespace ChatbotAPI.Controllers
             _context.ChatMessages.Add(mensagemUsuario);
             await _context.SaveChangesAsync();
 
-            // 2. Busca a Sessão (para pegar o System Prompt) e o Histórico da conversa
+            //Busca a Sessão (para pegar o System Prompt) e o Histórico da conversa
             var sessao = await _context.ChatSessions.FindAsync(request.SessionId);
             var historico = await _context.ChatMessages
                 .Where(m => m.SessionId == request.SessionId)
                 .OrderBy(m => m.CreatedAt)
                 .ToListAsync();
 
-            // 3. Monta o corpo da requisição no formato que o Gemini exige
+            //Monta o corpo da requisição no formato que o Gemini exige
             var conteudos = new List<object>();
             foreach (var msg in historico)
             {
-                // O Gemini usa "user" e "model" em vez de "User" e "Assistant"
                 string roleGemini = msg.Role == "User" ? "user" : "model";
                 conteudos.Add(new { role = roleGemini, parts = new[] { new { text = msg.Content } } });
             }
 
             var payload = new
             {
-                // Trocamos o underline por systemInstruction (com I maiúsculo)
-                // E adicionamos o new[] para garantir que é uma lista, como o Google exige!
+                //new[] para garantir que é uma lista, como o Google exige
                 systemInstruction = new { parts = new[] { new { text = sessao!.SystemPrompt } } },
                 contents = conteudos
             };
 
-            // 4. Faz a chamada HTTP para a API do Gemini
+            //Faz a chamada HTTP para a API do Gemini
             string apiKey = _configuration["GeminiApiKey"]!;
             string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={apiKey}";
 
@@ -78,9 +76,8 @@ namespace ChatbotAPI.Controllers
             var response = await httpClient.PostAsync(url, content);
             var jsonRetornado = await response.Content.ReadAsStringAsync();
 
-            // --- TRAVA DE SEGURANÇA ---
-            // Se o status da resposta não for de Sucesso (200 OK), a gente para tudo 
-            // e devolve o erro real do Google para a tela, sem quebrar o C#!
+            //Se o status da resposta não for de Sucesso (200 OK)
+            // devolve o erro real do Google para a tela.
             if (!response.IsSuccessStatusCode)
             {
                 return BadRequest(new
@@ -91,7 +88,7 @@ namespace ChatbotAPI.Controllers
             }
             // --------------------------
 
-            // Se passou do "if" acima, é porque deu tudo certo! Aí sim lemos o texto:
+            //Se passou do "if" lemos o texto:
             using var doc = JsonDocument.Parse(jsonRetornado);
             string respostaDaIA = doc.RootElement
                 .GetProperty("candidates")[0]
@@ -100,7 +97,7 @@ namespace ChatbotAPI.Controllers
                 .GetProperty("text")
                 .GetString()!;
 
-            // 6. Salva a resposta da IA no nosso banco de dados
+            //Salva a resposta da IA no nosso banco de dados
             var mensagemIA = new ChatMessage
             {
                 SessionId = request.SessionId,
@@ -110,7 +107,7 @@ namespace ChatbotAPI.Controllers
             _context.ChatMessages.Add(mensagemIA);
             await _context.SaveChangesAsync();
 
-            // 7. Devolve para o React (ou para o nosso teste)
+            //Devolve para o React
             return Ok(new { Resposta = respostaDaIA });
         }
     }
