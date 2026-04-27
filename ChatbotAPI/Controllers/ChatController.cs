@@ -1,116 +1,100 @@
-﻿using ChatbotAPI.Data;
+﻿using Microsoft.AspNetCore.Mvc;
+using ChatbotAPI.Data;
 using ChatbotAPI.Models;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using System.Text;
 using System.Text.Json;
+using System.Text;
 
-namespace ChatbotAPI.Controllers
+// Rota da API
+[Route("api/[controller]")]
+[ApiController]
+public class ChatController : ControllerBase
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    public class ChatController : ControllerBase
+    private readonly AppDbContext _context;
+    private readonly string _apiKey;
+
+    public ChatController(AppDbContext context, IConfiguration config)
     {
-        private readonly AppDbContext _context;
-        private readonly IConfiguration _configuration;
-
-        //Injetamos o IConfiguration para conseguirmos ler a chave no appsettings.json
-        public ChatController(AppDbContext context, IConfiguration configuration)
-        {
-            _context = context;
-            _configuration = configuration;
-        }
-
-        [HttpPost("nova-sessao")] // Rota para criar sessão no banco de dados e responder para o react
-        public async Task<IActionResult> CriarSessao([FromBody] string systemPrompt)
-        {
-            var sessao = new ChatSession { SystemPrompt = systemPrompt };
-            _context.ChatSessions.Add(sessao);
-            await _context.SaveChangesAsync();
-            return Ok(new { SessionId = sessao.Id });
-        }
-
-        [HttpPost("enviar-mensagem")] // Rota para enviar mensagem e receber respota do gemini
-        public async Task<IActionResult> EnviarMensagem([FromBody] MensagemRequest request)
-        {
-            //Salva a mensagem do usuário no banco
-            var mensagemUsuario = new ChatMessage
-            {
-                SessionId = request.SessionId,
-                Role = "User",
-                Content = request.Texto
-            };
-            _context.ChatMessages.Add(mensagemUsuario);
-            await _context.SaveChangesAsync();
-
-            //Busca a Sessão (para pegar o System Prompt) e o Histórico da conversa
-            var sessao = await _context.ChatSessions.FindAsync(request.SessionId);
-            var historico = await _context.ChatMessages
-                .Where(m => m.SessionId == request.SessionId)
-                .OrderBy(m => m.CreatedAt)
-                .ToListAsync();
-
-            //Monta o corpo da requisição no formato que o Gemini exige
-            var conteudos = new List<object>();
-            foreach (var msg in historico)
-            {
-                string roleGemini = msg.Role == "User" ? "user" : "model";
-                conteudos.Add(new { role = roleGemini, parts = new[] { new { text = msg.Content } } });
-            }
-
-            var payload = new
-            {
-                //new[] para garantir que é uma lista, como o Google exige
-                systemInstruction = new { parts = new[] { new { text = sessao!.SystemPrompt } } },
-                contents = conteudos
-            };
-
-            //Faz a chamada HTTP para a API do Gemini
-            string apiKey = _configuration["GeminiApiKey"]!;
-            string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={apiKey}";
-
-            using var httpClient = new HttpClient();
-            var jsonEnviado = JsonSerializer.Serialize(payload);
-            var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync(url, content);
-            var jsonRetornado = await response.Content.ReadAsStringAsync();
-
-            //Se o status da resposta não for de Sucesso (200 OK)
-            // devolve o erro real do Google para a tela.
-            if (!response.IsSuccessStatusCode)
-            {
-                return BadRequest(new
-                {
-                    Erro = "A API do Google recusou o pedido.",
-                    MotivoReal = jsonRetornado
-                });
-            }
-            // --------------------------
-
-            //Se passou do "if" lemos o texto:
-            using var doc = JsonDocument.Parse(jsonRetornado);
-            string respostaDaIA = doc.RootElement
-                .GetProperty("candidates")[0]
-                .GetProperty("content")
-                .GetProperty("parts")[0]
-                .GetProperty("text")
-                .GetString()!;
-
-            //Salva a resposta da IA no nosso banco de dados
-            var mensagemIA = new ChatMessage
-            {
-                SessionId = request.SessionId,
-                Role = "Assistant",
-                Content = respostaDaIA
-            };
-            _context.ChatMessages.Add(mensagemIA);
-            await _context.SaveChangesAsync();
-
-            //Devolve para o React
-            return Ok(new { Resposta = respostaDaIA });
-        }
+        _context = context;
+        _apiKey = config["GeminiApiKey"];
     }
 
+    // Rota Criar nova sessão
+    [HttpPost("nova-sessao")]
+    public IActionResult CriarSessao([FromBody] string prompt)
+    {
+        var sessao = new ChatSession { SystemPrompt = prompt };
+        
+        _context.ChatSessions.Add(sessao);
+        _context.SaveChanges();
+
+        // Retorna o ID para o React guardar
+        return Ok(new { sessionId = sessao.Id });
+    }
+
+    // Rota Enviar mensagens
+    [HttpPost("enviar-mensagem")]
+    public async Task<IActionResult> EnviarMensagem([FromBody] MensagemRequest request)
+    {
+        // Salva msg do usuario no banco
+        var msgUsuario = new ChatMessage { 
+            SessionId = request.SessionId, 
+            Role = "user", 
+            Content = request.Texto 
+        };
+        _context.ChatMessages.Add(msgUsuario);
+        _context.SaveChanges();
+
+        // Busca prompt e histórico
+        var sessao = _context.ChatSessions.Find(request.SessionId);
+        var historico = _context.ChatMessages
+            .Where(m => m.SessionId == request.SessionId)
+            .OrderBy(m => m.CreatedAt).ToList();
+
+        // Prepara o pacote JSON p/ Gemini
+        var payload = new {
+            systemInstruction = new { parts = new[] { new { text = sessao.SystemPrompt } } },
+
+            contents = historico.Select(m => new {
+            // Se no banco for "Assistant", enviamos "model" para o Google, caso contrario, user.
+            role = (m.Role == "Assistant") ? "model" : m.Role, 
+            parts = new[] { new { text = m.Content } }
+            })
+        };
+
+        // Faz a chamada para a API do Gemini
+        var client = new HttpClient();
+
+        // Transformar o objeto em json
+        var jsonParaIA = JsonSerializer.Serialize(payload);
+
+        // Cria o conteúdo: string, encoding, media type (encapsulamento de texto)
+        var conteudo = new StringContent(jsonParaIA, Encoding.UTF8, "application/json");
     
+        var url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + _apiKey;
+        
+        // Enviar pacote p/ google
+        var respostaIA = await client.PostAsync(url, conteudo);
+
+        // Ler a resposta do google
+        var resultadoBruto = await respostaIA.Content.ReadAsStringAsync();
+
+        // Extrai o texto da resposta usando JsonDocument (Parsing)
+        using var doc = JsonDocument.Parse(resultadoBruto);
+        string textoResposta = doc.RootElement
+            .GetProperty("candidates")[0]
+            .GetProperty("content")
+            .GetProperty("parts")[0]
+            .GetProperty("text").GetString();
+
+        // 6. Salva a resposta da IA no banco e envia para o React
+        var msgIA = new ChatMessage { 
+            SessionId = request.SessionId, 
+            Role = "Assistant", 
+            Content = textoResposta 
+        };
+        _context.ChatMessages.Add(msgIA);
+        _context.SaveChanges();
+
+        return Ok(new { resposta = textoResposta });
+    }
 }
