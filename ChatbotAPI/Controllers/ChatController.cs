@@ -1,9 +1,7 @@
-﻿using ChatbotAPI.Data;
-using ChatbotAPI.Models;
+﻿using ChatbotAPI.Models;
+using ChatbotAPI.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using System.Text;
-using System.Text.Json;
 
 namespace ChatbotAPI.Controllers
 {
@@ -11,106 +9,58 @@ namespace ChatbotAPI.Controllers
     [ApiController]
     public class ChatController : ControllerBase
     {
-        private readonly AppDbContext _context;
-        private readonly IConfiguration _configuration;
+        private readonly IChatService _chatService;
 
-        //Injetamos o IConfiguration para conseguirmos ler a chave no appsettings.json
-        public ChatController(AppDbContext context, IConfiguration configuration)
+        public ChatController(IChatService chatService)
         {
-            _context = context;
-            _configuration = configuration;
+            _chatService = chatService;
         }
 
         [HttpPost("nova-sessao")] // Rota para criar sessão no banco de dados e responder para o react
         public async Task<IActionResult> CriarSessao([FromBody] string systemPrompt)
         {
-            var sessao = new ChatSession { SystemPrompt = systemPrompt };
-            _context.ChatSessions.Add(sessao);
-            await _context.SaveChangesAsync();
-            return Ok(new { SessionId = sessao.Id });
+            var sessionId = await _chatService.CreateSessionAsync(systemPrompt);
+            return Ok(new { SessionId = sessionId });
+        }
+
+        [HttpPost("sessao/{sessionId:int}/documento")]
+        public async Task<IActionResult> AnexarDocumento([FromRoute] int sessionId, [FromForm] List<IFormFile> documentos)
+        {
+            var result = await _chatService.UploadDocumentsAsync(sessionId, documentos);
+
+            if (!result.Success)
+            {
+                return BadRequest(new { Erro = result.ErrorMessage });
+            }
+
+            return Ok(new
+            {
+                documentName = result.DocumentName,
+                extractedCharacters = result.ExtractedCharacters
+            });
+        }
+
+        [HttpDelete("sessao/{sessionId:int}/documento")]
+        public async Task<IActionResult> RemoverDocumento([FromRoute] int sessionId)
+        {
+            var removed = await _chatService.ClearDocumentsAsync(sessionId);
+
+            if (!removed)
+            {
+                return NotFound(new { Erro = "Sessão não encontrada." });
+            }
+
+            return Ok(new { Removido = true });
         }
 
         [HttpPost("enviar-mensagem")] // Rota para enviar mensagem e receber respota do gemini
         public async Task<IActionResult> EnviarMensagem([FromBody] MensagemRequest request)
         {
-            //Salva a mensagem do usuário no banco
-            var mensagemUsuario = new ChatMessage
-            {
-                SessionId = request.SessionId,
-                Role = "User",
-                Content = request.Texto
-            };
-            _context.ChatMessages.Add(mensagemUsuario);
-            await _context.SaveChangesAsync();
+            var result = await _chatService.SendMessageAsync(request);
+            if (!result.Success)
+                return BadRequest(new { Erro = "A API do Google recusou o pedido.", MotivoReal = result.ErrorMessage });
 
-            //Busca a Sessão (para pegar o System Prompt) e o Histórico da conversa
-            var sessao = await _context.ChatSessions.FindAsync(request.SessionId);
-            var historico = await _context.ChatMessages
-                .Where(m => m.SessionId == request.SessionId)
-                .OrderBy(m => m.CreatedAt)
-                .ToListAsync();
-
-            //Monta o corpo da requisição no formato que o Gemini exige
-            var conteudos = new List<object>();
-            foreach (var msg in historico)
-            {
-                string roleGemini = msg.Role == "User" ? "user" : "model";
-                conteudos.Add(new { role = roleGemini, parts = new[] { new { text = msg.Content } } });
-            }
-
-            var payload = new
-            {
-                //new[] para garantir que é uma lista, como o Google exige
-                systemInstruction = new { parts = new[] { new { text = sessao!.SystemPrompt } } },
-                contents = conteudos
-            };
-
-            //Faz a chamada HTTP para a API do Gemini
-            string apiKey = _configuration["GeminiApiKey"]!;
-            string url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={apiKey}";
-
-            using var httpClient = new HttpClient();
-            var jsonEnviado = JsonSerializer.Serialize(payload);
-            var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync(url, content);
-            var jsonRetornado = await response.Content.ReadAsStringAsync();
-
-            //Se o status da resposta não for de Sucesso (200 OK)
-            // devolve o erro real do Google para a tela.
-            if (!response.IsSuccessStatusCode)
-            {
-                return BadRequest(new
-                {
-                    Erro = "A API do Google recusou o pedido.",
-                    MotivoReal = jsonRetornado
-                });
-            }
-            // --------------------------
-
-            //Se passou do "if" lemos o texto:
-            using var doc = JsonDocument.Parse(jsonRetornado);
-            string respostaDaIA = doc.RootElement
-                .GetProperty("candidates")[0]
-                .GetProperty("content")
-                .GetProperty("parts")[0]
-                .GetProperty("text")
-                .GetString()!;
-
-            //Salva a resposta da IA no nosso banco de dados
-            var mensagemIA = new ChatMessage
-            {
-                SessionId = request.SessionId,
-                Role = "Assistant",
-                Content = respostaDaIA
-            };
-            _context.ChatMessages.Add(mensagemIA);
-            await _context.SaveChangesAsync();
-
-            //Devolve para o React
-            return Ok(new { Resposta = respostaDaIA });
+            return Ok(new { Resposta = result.Response });
         }
     }
-
-    
 }

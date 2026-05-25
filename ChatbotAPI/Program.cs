@@ -1,4 +1,5 @@
 using ChatbotAPI.Data;
+using ChatbotAPI.Options;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -18,8 +19,20 @@ builder.Services.AddCors(options =>
         });
 });
 
+var defaultConnection = builder.Configuration.GetConnectionString("DefaultConnection");
+if (string.IsNullOrWhiteSpace(defaultConnection))
+{
+    throw new InvalidOperationException("A connection string 'DefaultConnection' não foi configurada. Defina ConnectionStrings__DefaultConnection ou use appsettings.Development.json.");
+}
+
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlServer(defaultConnection, sqlOptions =>
+        sqlOptions.EnableRetryOnFailure()));
+
+builder.Services.Configure<GeminiOptions>(builder.Configuration.GetSection("Gemini"));
+
+// Serviços de aplicação
+builder.Services.AddScoped<ChatbotAPI.Services.IChatService, ChatbotAPI.Services.ChatService>();
 
 var app = builder.Build();
 

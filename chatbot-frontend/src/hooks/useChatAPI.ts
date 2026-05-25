@@ -5,6 +5,92 @@ export const useChatAPI = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const readErrorMessage = async (response: Response, fallbackMessage: string) => {
+    const rawBody = await response.text();
+
+    if (!rawBody.trim()) {
+      return fallbackMessage;
+    }
+
+    try {
+      const parsed = JSON.parse(rawBody) as { erro?: string; error?: string };
+      return parsed.erro || parsed.error || fallbackMessage;
+    } catch {
+      return rawBody;
+    }
+  };
+
+  const anexarDocumento = async (
+    sessionId: number,
+    documentos: File[],
+  ): Promise<{ documentName: string; extractedCharacters: number }> => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      documentos.forEach((documento) => {
+        formData.append('documentos', documento);
+      });
+
+      const response = await fetch(
+        `${API_BASE_URL}/chat/sessao/${sessionId}/documento`,
+        {
+          method: 'POST',
+          body: formData,
+        },
+      );
+
+      if (!response.ok) {
+        const errorMessage = await readErrorMessage(
+          response,
+          'Erro ao anexar documento',
+        );
+        throw new Error(errorMessage);
+      }
+
+      const data = await response.json();
+      return {
+        documentName: data.documentName,
+        extractedCharacters: data.extractedCharacters,
+      };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Erro desconhecido';
+      setError(errorMsg);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removerDocumento = async (sessionId: number): Promise<void> => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/chat/sessao/${sessionId}/documento`,
+        {
+          method: 'DELETE',
+        },
+      );
+
+      if (!response.ok) {
+        const errorMessage = await readErrorMessage(
+          response,
+          'Erro ao remover documento',
+        );
+        throw new Error(errorMessage);
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Erro desconhecido';
+      setError(errorMsg);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const criarSessao = async (systemPrompt: string): Promise<number> => {
     setLoading(true);
     setError(null);
@@ -16,8 +102,11 @@ export const useChatAPI = () => {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.erro || 'Erro ao criar sessão');
+        const errorMessage = await readErrorMessage(
+          response,
+          'Erro ao criar sessão',
+        );
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();
@@ -45,8 +134,11 @@ export const useChatAPI = () => {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.erro || 'Erro ao enviar mensagem');
+        const errorMessage = await readErrorMessage(
+          response,
+          'Erro ao enviar mensagem',
+        );
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();
@@ -60,5 +152,5 @@ export const useChatAPI = () => {
     }
   };
 
-  return { criarSessao, enviarMensagem, loading, error };
+  return { criarSessao, anexarDocumento, removerDocumento, enviarMensagem, loading, error };
 };

@@ -3,6 +3,7 @@ export interface ChatSession {
     localSessionId: string;
     systemPrompt: string;
     createdAt: string;
+    documentName?: string | null;
 }
 
 export interface ChatMessage {

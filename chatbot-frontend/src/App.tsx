@@ -69,6 +69,7 @@ export function App() {
         localSessionId,
         systemPrompt,
         createdAt: new Date().toISOString(),
+        documentName: null,
       };
 
       setSessions([...sessions, newSession]);
@@ -115,6 +116,22 @@ export function App() {
         message,
       ],
     }));
+  };
+
+  const handleDocumentUploaded = async (
+    sessionId: number,
+    documentName: string | null,
+  ) => {
+    setSessions((currentSessions) =>
+      currentSessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              documentName,
+            }
+          : session,
+      ),
+    );
   };
 
   const currentSession = activeSessionId
@@ -165,7 +182,9 @@ export function App() {
           <ChatWindow
             sessionId={currentSession.id}
             messages={currentMessages}
+            documentName={currentSession.documentName}
             onAddMessage={handleAddMessage}
+            onDocumentUploaded={handleDocumentUploaded}
           />
         ) : (
           <div className="h-full bg-slate-50 overflow-y-auto text-slate-500">

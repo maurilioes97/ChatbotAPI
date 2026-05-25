@@ -47,6 +47,11 @@ export const SessionItem = ({
           >
             {formatDate(session.createdAt)}
           </p>
+              {session.documentName && (
+                <p className={`text-xs mt-1 font-medium ${isActive ? 'text-blue-700' : 'text-blue-600'}`}>
+                  Documento: {session.documentName}
+                </p>
+              )}
         </div>
         <button
           onClick={(e) => {

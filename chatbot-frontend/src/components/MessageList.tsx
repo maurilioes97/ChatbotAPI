@@ -6,12 +6,14 @@ interface MessageListProps {
   messages: ChatMessage[];
   isTyping?: boolean;
   typingMessage?: string;
+  documentName?: string | null;
 }
 
 export const MessageList = ({
   messages,
   isTyping = false,
   typingMessage = '',
+  documentName,
 }: MessageListProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -23,9 +25,16 @@ export const MessageList = ({
   if (messages.length === 0 && !typingMessage) {
     return (
       <div className="flex-1 flex items-center justify-center text-slate-500 px-6">
-        <p className="text-center text-lg md:text-base max-w-sm">
-          Nenhuma mensagem ainda. Comece conversando!
-        </p>
+        <div className="text-center space-y-3 max-w-md">
+          {documentName ? (
+            <p className="text-sm md:text-base text-blue-600 font-medium">
+              Documento ativo: {documentName}
+            </p>
+          ) : null}
+          <p className="text-lg md:text-base">
+            Nenhuma mensagem ainda. Comece conversando!
+          </p>
+        </div>
       </div>
     );
   }
@@ -33,6 +42,12 @@ export const MessageList = ({
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-4 md:px-8 py-6">
       <div className="mx-auto w-full max-w-6xl space-y-6">
+        {documentName && (
+          <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+            Conversando com o documento: <span className="font-semibold">{documentName}</span>
+          </div>
+        )}
+
         {messages.map((message) => (
           <MessageItem key={message.id} message={message} />
         ))}
