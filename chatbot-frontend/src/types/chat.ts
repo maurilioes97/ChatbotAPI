@@ -4,6 +4,7 @@ export interface ChatSession {
     systemPrompt: string;
     createdAt: string;
     documentName?: string | null;
+    suggestedQuestions?: string[];
 }
 
 export interface ChatMessage {

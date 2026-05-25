@@ -23,7 +23,7 @@ export const useChatAPI = () => {
   const anexarDocumento = async (
     sessionId: number,
     documentos: File[],
-  ): Promise<{ documentName: string; extractedCharacters: number }> => {
+  ): Promise<{ documentName: string; extractedCharacters: number; suggestedQuestions: string[] }> => {
     setLoading(true);
     setError(null);
 
@@ -53,6 +53,7 @@ export const useChatAPI = () => {
       return {
         documentName: data.documentName,
         extractedCharacters: data.extractedCharacters,
+        suggestedQuestions: data.suggestedQuestions ?? [],
       };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Erro desconhecido';

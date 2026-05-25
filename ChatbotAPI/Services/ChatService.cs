@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
 
 namespace ChatbotAPI.Services
@@ -23,6 +24,7 @@ namespace ChatbotAPI.Services
         public bool Success { get; set; }
         public string? DocumentName { get; set; }
         public int ExtractedCharacters { get; set; }
+        public List<string> SuggestedQuestions { get; set; } = new();
         public string? ErrorMessage { get; set; }
     }
 
@@ -111,13 +113,16 @@ namespace ChatbotAPI.Services
             sessao.DocumentName = string.Join(", ", documentNames);
             sessao.DocumentContext = TrimDocumentContext(string.Join("\n\n", documentParts));
 
+            var suggestedQuestions = await GenerateSuggestedQuestionsAsync(sessao);
+
             await _context.SaveChangesAsync();
 
             return new DocumentUploadResponse
             {
                 Success = true,
                 DocumentName = sessao.DocumentName,
-                ExtractedCharacters = totalCharacters
+                ExtractedCharacters = totalCharacters,
+                SuggestedQuestions = suggestedQuestions
             };
         }
 
@@ -304,6 +309,98 @@ namespace ChatbotAPI.Services
             }
 
             return text[..MaxDocumentContextChars];
+        }
+
+        private async Task<List<string>> GenerateSuggestedQuestionsAsync(ChatSession sessao)
+        {
+            if (string.IsNullOrWhiteSpace(_geminiOptions.ApiKey) || string.IsNullOrWhiteSpace(sessao.DocumentContext))
+            {
+                return GetFallbackQuestions(sessao);
+            }
+
+            var prompt =
+                "Leia o documento abaixo e sugira exatamente 3 perguntas inteligentes que o usuário pode fazer sobre ele. " +
+                "As perguntas devem ser curtas, objetivas e diretamente relacionadas ao conteúdo. " +
+                "Responda somente com as 3 perguntas, uma por linha, sem numeração, sem marcadores e sem explicações.\n\n" +
+                sessao.DocumentContext;
+
+            var payload = new
+            {
+                contents = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        parts = new[] { new { text = prompt } }
+                    }
+                }
+            };
+
+            string url = $"{_geminiOptions.BaseUrl}/{_geminiOptions.Model}:generateContent?key={_geminiOptions.ApiKey}";
+
+            try
+            {
+                using var httpClient = new HttpClient();
+                var jsonEnviado = JsonSerializer.Serialize(payload);
+                var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
+
+                var response = await httpClient.PostAsync(url, content);
+                var jsonRetornado = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return GetFallbackQuestions(sessao);
+                }
+
+                using var doc = JsonDocument.Parse(jsonRetornado);
+                var rawText = doc.RootElement
+                    .GetProperty("candidates")[0]
+                    .GetProperty("content")
+                    .GetProperty("parts")[0]
+                    .GetProperty("text")
+                    .GetString();
+
+                var questions = (rawText ?? string.Empty)
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(NormalizeSuggestedQuestion)
+                    .Where(question => !string.IsNullOrWhiteSpace(question))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(3)
+                    .ToList();
+
+                if (questions.Count < 3)
+                {
+                    questions.AddRange(GetFallbackQuestions(sessao).Where(q => !questions.Contains(q, StringComparer.OrdinalIgnoreCase)));
+                }
+
+                return questions.Take(3).ToList();
+            }
+            catch
+            {
+                return GetFallbackQuestions(sessao);
+            }
+        }
+
+        private static string NormalizeSuggestedQuestion(string line)
+        {
+            var cleaned = line.Trim();
+            cleaned = Regex.Replace(cleaned, @"^[-*•\s]+", string.Empty);
+            cleaned = Regex.Replace(cleaned, @"^\d+[\).\-:\s]+", string.Empty);
+            return cleaned.Trim();
+        }
+
+        private static List<string> GetFallbackQuestions(ChatSession sessao)
+        {
+            var subject = string.IsNullOrWhiteSpace(sessao.DocumentName)
+                ? "este documento"
+                : sessao.DocumentName.Split(',')[0].Trim();
+
+            return new List<string>
+            {
+                $"Qual é o objetivo principal de {subject}?",
+                $"Quais pontos mais importantes eu devo entender em {subject}?",
+                $"Que informações de {subject} merecem atenção especial?"
+            };
         }
     }
 }

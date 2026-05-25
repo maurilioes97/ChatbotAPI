@@ -20,16 +20,16 @@ export function App() {
 
   const sessionSuggestions = [
     {
+      title: 'Conversar com PDF',
+      description: 'Carregue um PDF e faça perguntas sobre seu conteúdo. O assistente usará o documento como contexto.',
+      prompt: 'Você é um assistente que responde usando estritamente o conteúdo do documento carregado como contexto principal. Se a resposta não estiver no documento, diga claramente que não há informação suficiente e pergunte por mais detalhes ou solicite o documento correto. Responda em português formal e conciso.',
+    },
+    {
       title: 'Programação C#/.NET',
       description: 'Tire dúvidas técnicas com foco em backend, API e boas práticas.',
       prompt: 'Você é um assistente para dúvidas de programação em C# e .NET.',
     },
-    {
-      title: 'Tutor da Faculdade',
-      description: 'Receba explicações passo a passo para exercícios e trabalhos.',
-      prompt:
-        'Você é um tutor para exercícios da faculdade, explicando passo a passo.',
-    },
+    
     {
       title: 'Revisor Acadêmico',
       description: 'Revise textos em português formal com foco em clareza e coesão.',
@@ -121,6 +121,7 @@ export function App() {
   const handleDocumentUploaded = async (
     sessionId: number,
     documentName: string | null,
+    suggestedQuestions: string[],
   ) => {
     setSessions((currentSessions) =>
       currentSessions.map((session) =>
@@ -128,6 +129,7 @@ export function App() {
           ? {
               ...session,
               documentName,
+              suggestedQuestions,
             }
           : session,
       ),
@@ -183,6 +185,7 @@ export function App() {
             sessionId={currentSession.id}
             messages={currentMessages}
             documentName={currentSession.documentName}
+            suggestedQuestions={currentSession.suggestedQuestions}
             onAddMessage={handleAddMessage}
             onDocumentUploaded={handleDocumentUploaded}
           />

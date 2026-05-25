@@ -36,7 +36,8 @@ namespace ChatbotAPI.Controllers
             return Ok(new
             {
                 documentName = result.DocumentName,
-                extractedCharacters = result.ExtractedCharacters
+                extractedCharacters = result.ExtractedCharacters,
+                suggestedQuestions = result.SuggestedQuestions
             });
         }
 
