@@ -63,5 +63,18 @@ namespace ChatbotAPI.Controllers
 
             return Ok(new { Resposta = result.Response });
         }
+
+        [HttpPost("sessao/{sessionId:int}/encerrar-e-exportar-resumo")]
+        public async Task<IActionResult> EncerrarEExportarResumo([FromRoute] int sessionId)
+        {
+            var result = await _chatService.ExportSummaryPdfAsync(sessionId);
+
+            if (!result.Success || result.FileContent is null || string.IsNullOrWhiteSpace(result.FileName))
+            {
+                return BadRequest(new { Erro = result.ErrorMessage ?? "Não foi possível gerar o resumo." });
+            }
+
+            return File(result.FileContent, "application/pdf", result.FileName);
+        }
     }
 }

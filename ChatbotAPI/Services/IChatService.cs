@@ -9,5 +9,6 @@ namespace ChatbotAPI.Services
         Task<DocumentUploadResponse> UploadDocumentsAsync(int sessionId, IEnumerable<IFormFile> documents);
         Task<bool> ClearDocumentsAsync(int sessionId);
         Task<ChatResponse> SendMessageAsync(MensagemRequest request);
+        Task<SummaryExportResponse> ExportSummaryPdfAsync(int sessionId);
     }
 }

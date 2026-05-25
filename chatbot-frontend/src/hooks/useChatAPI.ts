@@ -153,5 +153,45 @@ export const useChatAPI = () => {
     }
   };
 
-  return { criarSessao, anexarDocumento, removerDocumento, enviarMensagem, loading, error };
+  const exportarResumo = async (sessionId: number): Promise<void> => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/chat/sessao/${sessionId}/encerrar-e-exportar-resumo`,
+        {
+          method: 'POST',
+        },
+      );
+
+      if (!response.ok) {
+        const errorMessage = await readErrorMessage(
+          response,
+          'Erro ao exportar resumo',
+        );
+        throw new Error(errorMessage);
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get('content-disposition') ?? '';
+      const fileNameMatch = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+      const fileName = fileNameMatch?.[1] || fileNameMatch?.[2] || `resumo-sessao-${sessionId}.pdf`;
+
+      const downloadUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = downloadUrl;
+      anchor.download = decodeURIComponent(fileName);
+      anchor.click();
+      URL.revokeObjectURL(downloadUrl);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Erro desconhecido';
+      setError(errorMsg);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return { criarSessao, anexarDocumento, removerDocumento, exportarResumo, enviarMensagem, loading, error };
 };

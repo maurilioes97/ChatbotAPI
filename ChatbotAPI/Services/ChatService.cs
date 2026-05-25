@@ -28,6 +28,14 @@ namespace ChatbotAPI.Services
         public string? ErrorMessage { get; set; }
     }
 
+    public class SummaryExportResponse
+    {
+        public bool Success { get; set; }
+        public byte[]? FileContent { get; set; }
+        public string? FileName { get; set; }
+        public string? ErrorMessage { get; set; }
+    }
+
     public class ChatService : IChatService
     {
         private readonly AppDbContext _context;
@@ -231,6 +239,50 @@ namespace ChatbotAPI.Services
             return new ChatResponse { Success = true, Response = respostaDaIA };
         }
 
+        public async Task<SummaryExportResponse> ExportSummaryPdfAsync(int sessionId)
+        {
+            var sessao = await _context.ChatSessions.FindAsync(sessionId);
+            if (sessao is null)
+            {
+                return new SummaryExportResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Sessão não encontrada."
+                };
+            }
+
+            var historico = await _context.ChatMessages
+                .Where(m => m.SessionId == sessionId)
+                .OrderBy(m => m.CreatedAt)
+                .ToListAsync();
+
+            if (historico.Count == 0 && string.IsNullOrWhiteSpace(sessao.DocumentContext))
+            {
+                return new SummaryExportResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Não há conteúdo suficiente para gerar o resumo."
+                };
+            }
+
+            var summaryMarkdown = await GenerateSummaryMarkdownAsync(sessao, historico);
+            var pdfBytes = SimplePdfWriter.BuildSummaryPdf(
+                title: "Encerrar e Exportar Resumo",
+                subtitle: BuildSummarySubtitle(sessao, historico.Count),
+                markdownContent: summaryMarkdown,
+                footerText: $"Gerado em {DateTime.Now:dd/MM/yyyy HH:mm}"
+            );
+
+            var fileName = BuildSummaryFileName(sessao);
+
+            return new SummaryExportResponse
+            {
+                Success = true,
+                FileContent = pdfBytes,
+                FileName = fileName
+            };
+        }
+
         private static string BuildSystemPrompt(ChatSession sessao)
         {
             var partes = new List<string>();
@@ -401,6 +453,157 @@ namespace ChatbotAPI.Services
                 $"Quais pontos mais importantes eu devo entender em {subject}?",
                 $"Que informações de {subject} merecem atenção especial?"
             };
+        }
+
+        private async Task<string> GenerateSummaryMarkdownAsync(ChatSession sessao, IReadOnlyList<ChatMessage> historico)
+        {
+            var transcript = BuildConversationTranscript(historico);
+            if (string.IsNullOrWhiteSpace(_geminiOptions.ApiKey) || string.IsNullOrWhiteSpace(transcript))
+            {
+                return BuildFallbackSummaryMarkdown(sessao, historico);
+            }
+
+            var prompt =
+                "Você vai resumir uma conversa sobre um documento. Gere um resumo executivo em português, usando markdown simples e SOMENTE esta estrutura: \n" +
+                "# Resumo Executivo\n" +
+                "## Contexto\n" +
+                "## Pontos principais\n" +
+                "- ...\n" +
+                "## Conclusão\n" +
+                "## Próximos passos\n" +
+                "- ...\n\n" +
+                "Regras: seja objetivo, não invente informações, use frases curtas e claras.\n\n" +
+                $"Documento: {sessao.DocumentName ?? "Documento sem nome"}\n\n" +
+                $"Conversa:\n{transcript}";
+
+            var payload = new
+            {
+                contents = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        parts = new[] { new { text = prompt } }
+                    }
+                },
+                generationConfig = new { temperature = 0.25 }
+            };
+
+            try
+            {
+                string url = $"{_geminiOptions.BaseUrl}/{_geminiOptions.Model}:generateContent?key={_geminiOptions.ApiKey}";
+
+                using var httpClient = new HttpClient();
+                var jsonEnviado = JsonSerializer.Serialize(payload);
+                var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
+
+                var response = await httpClient.PostAsync(url, content);
+                var jsonRetornado = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return BuildFallbackSummaryMarkdown(sessao, historico);
+                }
+
+                using var doc = JsonDocument.Parse(jsonRetornado);
+                var rawText = doc.RootElement
+                    .GetProperty("candidates")[0]
+                    .GetProperty("content")
+                    .GetProperty("parts")[0]
+                    .GetProperty("text")
+                    .GetString();
+
+                var normalized = NormalizeSummaryMarkdown(rawText ?? string.Empty);
+                return string.IsNullOrWhiteSpace(normalized)
+                    ? BuildFallbackSummaryMarkdown(sessao, historico)
+                    : normalized;
+            }
+            catch
+            {
+                return BuildFallbackSummaryMarkdown(sessao, historico);
+            }
+        }
+
+        private static string BuildConversationTranscript(IReadOnlyList<ChatMessage> historico)
+        {
+            if (historico.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            var transcript = new StringBuilder();
+            foreach (var message in historico)
+            {
+                var label = message.Role == "User" ? "Usuário" : message.Role == "Assistant" ? "Assistente" : message.Role;
+                transcript.AppendLine($"{label}: {message.Content}");
+                transcript.AppendLine();
+            }
+
+            var text = transcript.ToString().Trim();
+            const int maxTranscriptChars = 12000;
+            return text.Length <= maxTranscriptChars ? text : text[..maxTranscriptChars];
+        }
+
+        private static string BuildSummarySubtitle(ChatSession sessao, int messageCount)
+        {
+            var documentLabel = string.IsNullOrWhiteSpace(sessao.DocumentName)
+                ? "Sem documento anexado"
+                : sessao.DocumentName;
+
+            return $"Documento: {documentLabel} | Mensagens na conversa: {messageCount}";
+        }
+
+        private static string BuildSummaryFileName(ChatSession sessao)
+        {
+            var baseName = string.IsNullOrWhiteSpace(sessao.DocumentName)
+                ? $"resumo-sessao-{sessao.Id}"
+                : sessao.DocumentName.Split(',')[0].Trim();
+
+            var safeName = new string(baseName.Select(ch => Path.GetInvalidFileNameChars().Contains(ch) ? '-' : ch).ToArray());
+            safeName = string.IsNullOrWhiteSpace(safeName) ? $"resumo-sessao-{sessao.Id}" : safeName;
+            return $"{safeName}-resumo.pdf";
+        }
+
+        private static string NormalizeSummaryMarkdown(string rawText)
+        {
+            var text = rawText.Trim();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            if (!text.StartsWith("#"))
+            {
+                text = "# Resumo Executivo\n\n" + text;
+            }
+
+            return text;
+        }
+
+        private static string BuildFallbackSummaryMarkdown(ChatSession sessao, IReadOnlyList<ChatMessage> historico)
+        {
+            var documentLabel = string.IsNullOrWhiteSpace(sessao.DocumentName)
+                ? "Documento não informado"
+                : sessao.DocumentName;
+
+            var recentMessages = historico
+                .TakeLast(8)
+                .Select(message => $"- {(message.Role == "User" ? "Usuário" : "Assistente")}: {message.Content}")
+                .ToList();
+
+            return string.Join("\n", new[]
+            {
+                "# Resumo Executivo",
+                "## Contexto",
+                $"Conversa baseada em {documentLabel}.",
+                "## Pontos principais",
+                recentMessages.Count > 0 ? string.Join("\n", recentMessages) : "- Não há mensagens suficientes para extrair pontos principais.",
+                "## Conclusão",
+                "O assistente analisou o conteúdo da conversa e consolidou os pontos discutidos.",
+                "## Próximos passos",
+                "- Revisar os pontos principais no documento.",
+                "- Validar eventuais dúvidas que ainda ficaram em aberto.",
+            });
         }
     }
 }

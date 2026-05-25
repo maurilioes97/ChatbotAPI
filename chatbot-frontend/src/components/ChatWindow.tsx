@@ -14,6 +14,7 @@ interface ChatWindowProps {
 }
 
 const createMessageId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
+const EMPTY_SUGGESTIONS: string[] = [];
 
 export const ChatWindow = ({
   sessionId,
@@ -23,14 +24,14 @@ export const ChatWindow = ({
   onAddMessage,
   onDocumentUploaded,
 }: ChatWindowProps) => {
-  const { enviarMensagem, anexarDocumento, removerDocumento, loading, error } = useChatAPI();
+  const { enviarMensagem, anexarDocumento, removerDocumento, exportarResumo, loading, error } = useChatAPI();
   const [localError, setLocalError] = useState<string | null>(error);
   const [typingMessage, setTypingMessage] = useState('');
   const [isAnimatingResponse, setIsAnimatingResponse] = useState(false);
+  const [isExportingSummary, setIsExportingSummary] = useState(false);
   const [activeDocumentName, setActiveDocumentName] = useState<string | null>(
     documentName ?? null,
   );
-  const [activeSuggestions, setActiveSuggestions] = useState<string[]>(suggestedQuestions);
 
   useEffect(() => {
     setLocalError(error);
@@ -39,10 +40,6 @@ export const ChatWindow = ({
   useEffect(() => {
     setActiveDocumentName(documentName ?? null);
   }, [documentName]);
-
-  useEffect(() => {
-    setActiveSuggestions(suggestedQuestions);
-  }, [suggestedQuestions]);
 
   const animateAssistantMessage = async (fullText: string) => {
     if (!fullText) {
@@ -107,7 +104,6 @@ export const ChatWindow = ({
       const result = await anexarDocumento(sessionId, files);
       const resolvedDocumentName = result.documentName || files.map((file) => file.name).join(', ');
       setActiveDocumentName(resolvedDocumentName);
-      setActiveSuggestions(result.suggestedQuestions);
       await onDocumentUploaded(sessionId, resolvedDocumentName, result.suggestedQuestions);
     } catch (err) {
       setLocalError(
@@ -121,7 +117,6 @@ export const ChatWindow = ({
       setLocalError(null);
       await removerDocumento(sessionId);
       setActiveDocumentName(null);
-      setActiveSuggestions([]);
       await onDocumentUploaded(sessionId, null, []);
     } catch (err) {
       setLocalError(
@@ -134,8 +129,56 @@ export const ChatWindow = ({
     void handleSendMessage(question);
   };
 
+  const handleExportSummary = async () => {
+    try {
+      setLocalError(null);
+      setIsExportingSummary(true);
+      await exportarResumo(sessionId);
+    } catch (err) {
+      setLocalError(
+        err instanceof Error ? err.message : 'Erro ao exportar resumo',
+      );
+    } finally {
+      setIsExportingSummary(false);
+    }
+  };
+
+  const activeSuggestions = suggestedQuestions ?? EMPTY_SUGGESTIONS;
+
   return (
     <div className="flex flex-col h-full min-h-0 w-full bg-slate-50">
+      <div className="px-3 md:px-4 pt-3 pb-3 bg-slate-50 border-b border-slate-200">
+        <div className="mx-auto w-full max-w-6xl flex items-center justify-end">
+          <button
+            type="button"
+            onClick={handleExportSummary}
+            disabled={loading || isAnimatingResponse || isExportingSummary}
+            aria-busy={isExportingSummary}
+            className="group inline-flex items-center gap-1.5 rounded-xl border border-slate-800/10 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-700 px-3 py-2 text-xs font-semibold text-white shadow-md shadow-slate-900/15 transition-all duration-200 hover:-translate-y-0.5 hover:from-slate-800 hover:via-slate-800 hover:to-slate-700 hover:shadow-lg hover:shadow-slate-900/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-50 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
+          >
+            {isExportingSummary ? (
+              <span className="h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <svg
+                className="h-3.5 w-3.5 transition-transform duration-200 group-hover:-translate-y-0.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path
+                  d="M12 3v10m0 0 4-4m-4 4-4-4M5 14.5V17a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2.5"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
+            <span className="whitespace-nowrap">Exportar resumo</span>
+          </button>
+        </div>
+      </div>
+
       <MessageList
         messages={messages}
         isTyping={loading && !typingMessage}
