@@ -15,6 +15,9 @@ interface ChatWindowProps {
 
 const createMessageId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
 const EMPTY_SUGGESTIONS: string[] = [];
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_TOTAL_UPLOAD_BYTES = 20 * 1024 * 1024;
+const ALLOWED_EXTENSIONS = new Set(['.pdf', '.txt']);
 
 export const ChatWindow = ({
   sessionId,
@@ -101,6 +104,31 @@ export const ChatWindow = ({
   const handleAttachDocument = async (files: File[]) => {
     try {
       setLocalError(null);
+
+      const invalidFile = files.find((file) => {
+        const extension = file.name.includes('.')
+          ? file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
+          : '';
+        return !ALLOWED_EXTENSIONS.has(extension);
+      });
+
+      if (invalidFile) {
+        setLocalError(`Formato não suportado em '${invalidFile.name}'. Use apenas arquivos PDF ou TXT.`);
+        return;
+      }
+
+      const oversizedFile = files.find((file) => file.size > MAX_FILE_SIZE_BYTES);
+      if (oversizedFile) {
+        setLocalError(`O arquivo '${oversizedFile.name}' excede o limite de 10 MB por arquivo.`);
+        return;
+      }
+
+      const totalBytes = files.reduce((acc, file) => acc + file.size, 0);
+      if (totalBytes > MAX_TOTAL_UPLOAD_BYTES) {
+        setLocalError('O total dos arquivos excede o limite de 20 MB por envio.');
+        return;
+      }
+
       const result = await anexarDocumento(sessionId, files);
       const resolvedDocumentName = result.documentName || files.map((file) => file.name).join(', ');
       setActiveDocumentName(resolvedDocumentName);

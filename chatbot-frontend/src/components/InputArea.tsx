@@ -71,7 +71,7 @@ export const InputArea = ({
           <input
             id="document-upload-input"
             type="file"
-            accept=".txt,.csv,.pdf"
+            accept=".txt,.pdf"
             multiple
             onChange={handleFileChange}
             disabled={isLoading}

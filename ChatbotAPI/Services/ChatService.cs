@@ -41,6 +41,8 @@ namespace ChatbotAPI.Services
         private readonly AppDbContext _context;
         private readonly GeminiOptions _geminiOptions;
         private const int MaxDocumentContextChars = 50000;
+        private const long MaxFileSizeBytes = 10L * 1024 * 1024;
+        private const long MaxTotalUploadBytes = 20L * 1024 * 1024;
 
         public ChatService(AppDbContext context, IOptions<GeminiOptions> geminiOptions)
         {
@@ -68,6 +70,26 @@ namespace ChatbotAPI.Services
                 {
                     Success = false,
                     ErrorMessage = "Nenhum arquivo foi enviado."
+                };
+            }
+
+            var oversizedDocument = validDocuments.FirstOrDefault(document => document.Length > MaxFileSizeBytes);
+            if (oversizedDocument is not null)
+            {
+                return new DocumentUploadResponse
+                {
+                    Success = false,
+                    ErrorMessage = $"O arquivo '{oversizedDocument.FileName}' excede o limite de 10 MB por arquivo."
+                };
+            }
+
+            var totalBytes = validDocuments.Sum(document => document.Length);
+            if (totalBytes > MaxTotalUploadBytes)
+            {
+                return new DocumentUploadResponse
+                {
+                    Success = false,
+                    ErrorMessage = "O total dos arquivos excede o limite de 20 MB por envio."
                 };
             }
 
@@ -316,9 +338,8 @@ namespace ChatbotAPI.Services
             return extension switch
             {
                 ".txt" => await ReadPlainTextAsync(document),
-                ".csv" => await ReadPlainTextAsync(document),
                 ".pdf" => await ReadPdfTextAsync(document),
-                _ => throw new InvalidOperationException("Formato não suportado. Use arquivos TXT, PDF ou CSV.")
+                _ => throw new InvalidOperationException("Formato não suportado. Use apenas arquivos TXT ou PDF.")
             };
         }
 

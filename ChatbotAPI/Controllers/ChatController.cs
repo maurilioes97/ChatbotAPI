@@ -24,6 +24,7 @@ namespace ChatbotAPI.Controllers
         }
 
         [HttpPost("sessao/{sessionId:int}/documento")]
+        [RequestFormLimits(MultipartBodyLengthLimit = 20 * 1024 * 1024)]
         public async Task<IActionResult> AnexarDocumento([FromRoute] int sessionId, [FromForm] List<IFormFile> documentos)
         {
             var result = await _chatService.UploadDocumentsAsync(sessionId, documentos);
