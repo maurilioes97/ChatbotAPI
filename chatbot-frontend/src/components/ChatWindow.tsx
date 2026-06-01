@@ -27,7 +27,7 @@ export const ChatWindow = ({
   onAddMessage,
   onDocumentUploaded,
 }: ChatWindowProps) => {
-  const { enviarMensagem, anexarDocumento, removerDocumento, exportarResumo, loading, error } = useChatAPI();
+  const { enviarMensagem, anexarDocumento, removerDocumento, transcreverAudio, exportarResumo, loading, error } = useChatAPI();
   const [localError, setLocalError] = useState<string | null>(error);
   const [typingMessage, setTypingMessage] = useState('');
   const [isAnimatingResponse, setIsAnimatingResponse] = useState(false);
@@ -171,6 +171,29 @@ export const ChatWindow = ({
     }
   };
 
+  const handleSendAudio = async (audio: File) => {
+    try {
+      setLocalError(null);
+
+      if (audio.size > 15 * 1024 * 1024) {
+        setLocalError('O áudio excede o limite de 15 MB por envio.');
+        return;
+      }
+
+      const transcript = await transcreverAudio(sessionId, audio);
+      if (!transcript.trim()) {
+        setLocalError('Não foi possível transcrever o áudio enviado.');
+        return;
+      }
+
+      await handleSendMessage(transcript);
+    } catch (err) {
+      setLocalError(
+        err instanceof Error ? err.message : 'Erro ao enviar áudio',
+      );
+    }
+  };
+
   const activeSuggestions = suggestedQuestions ?? EMPTY_SUGGESTIONS;
 
   return (
@@ -246,6 +269,7 @@ export const ChatWindow = ({
       <InputArea
         onSendMessage={handleSendMessage}
         onAttachDocument={handleAttachDocument}
+        onSendAudio={handleSendAudio}
         onRemoveDocument={handleRemoveDocument}
         isLoading={loading || isAnimatingResponse}
         documentName={activeDocumentName}

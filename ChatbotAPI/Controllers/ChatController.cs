@@ -55,12 +55,26 @@ namespace ChatbotAPI.Controllers
             return Ok(new { Removido = true });
         }
 
+        [HttpPost("sessao/{sessionId:int}/audio")]
+        [RequestFormLimits(MultipartBodyLengthLimit = 15 * 1024 * 1024)]
+        public async Task<IActionResult> TranscreverAudio([FromRoute] int sessionId, [FromForm] IFormFile audio)
+        {
+            var result = await _chatService.TranscribeAudioAsync(sessionId, audio);
+
+            if (!result.Success)
+            {
+                return BadRequest(new { Erro = result.ErrorMessage });
+            }
+
+            return Ok(new { transcript = result.Transcript });
+        }
+
         [HttpPost("enviar-mensagem")] // Rota para enviar mensagem e receber respota do gemini
         public async Task<IActionResult> EnviarMensagem([FromBody] MensagemRequest request)
         {
             var result = await _chatService.SendMessageAsync(request);
             if (!result.Success)
-                return BadRequest(new { Erro = "A API do Google recusou o pedido.", MotivoReal = result.ErrorMessage });
+                return BadRequest(new { Erro = result.ErrorMessage ?? "A API do Google recusou o pedido." });
 
             return Ok(new { Resposta = result.Response });
         }

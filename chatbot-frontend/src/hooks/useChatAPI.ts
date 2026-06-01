@@ -13,8 +13,13 @@ export const useChatAPI = () => {
     }
 
     try {
-      const parsed = JSON.parse(rawBody) as { erro?: string; error?: string };
-      return parsed.erro || parsed.error || fallbackMessage;
+      const parsed = JSON.parse(rawBody) as {
+        erro?: string;
+        error?: string;
+        motivoReal?: string;
+        motivo_real?: string;
+      };
+      return parsed.erro || parsed.error || parsed.motivoReal || parsed.motivo_real || fallbackMessage;
     } catch {
       return rawBody;
     }
@@ -153,6 +158,41 @@ export const useChatAPI = () => {
     }
   };
 
+  const transcreverAudio = async (sessionId: number, audio: File): Promise<string> => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', audio);
+
+      const response = await fetch(
+        `${API_BASE_URL}/chat/sessao/${sessionId}/audio`,
+        {
+          method: 'POST',
+          body: formData,
+        },
+      );
+
+      if (!response.ok) {
+        const errorMessage = await readErrorMessage(
+          response,
+          'Erro ao transcrever áudio',
+        );
+        throw new Error(errorMessage);
+      }
+
+      const data = await response.json();
+      return data.transcript;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Erro desconhecido';
+      setError(errorMsg);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const exportarResumo = async (sessionId: number): Promise<void> => {
     setLoading(true);
     setError(null);
@@ -193,5 +233,5 @@ export const useChatAPI = () => {
     }
   };
 
-  return { criarSessao, anexarDocumento, removerDocumento, exportarResumo, enviarMensagem, loading, error };
+  return { criarSessao, anexarDocumento, removerDocumento, transcreverAudio, exportarResumo, enviarMensagem, loading, error };
 };

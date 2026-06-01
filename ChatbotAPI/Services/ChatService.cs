@@ -36,6 +36,49 @@ namespace ChatbotAPI.Services
         public string? ErrorMessage { get; set; }
     }
 
+    public class AudioTranscriptionResponse
+    {
+        public bool Success { get; set; }
+        public string? Transcript { get; set; }
+        public string? ErrorMessage { get; set; }
+    }
+
+    public class GeminiContentPart
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("text")]
+        public string? Text { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("inline_data")]
+        public GeminiInlineData? InlineData { get; set; }
+    }
+
+    public class GeminiInlineData
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("mime_type")]
+        public string MimeType { get; set; } = string.Empty;
+
+        [System.Text.Json.Serialization.JsonPropertyName("data")]
+        public string Data { get; set; } = string.Empty;
+    }
+
+    public class GeminiContent
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("role")]
+        public string Role { get; set; } = "user";
+
+        [System.Text.Json.Serialization.JsonPropertyName("parts")]
+        public List<GeminiContentPart> Parts { get; set; } = new();
+    }
+
+    public class GeminiGenerateContentRequest
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("contents")]
+        public List<GeminiContent> Contents { get; set; } = new();
+
+        [System.Text.Json.Serialization.JsonPropertyName("generationConfig")]
+        public object? GenerationConfig { get; set; }
+    }
+
     public class ChatService : IChatService
     {
         private readonly AppDbContext _context;
@@ -43,6 +86,11 @@ namespace ChatbotAPI.Services
         private const int MaxDocumentContextChars = 50000;
         private const long MaxFileSizeBytes = 10L * 1024 * 1024;
         private const long MaxTotalUploadBytes = 20L * 1024 * 1024;
+        private const long MaxAudioSizeBytes = 15L * 1024 * 1024;
+        private static readonly HashSet<string> AllowedAudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".wav", ".mp3", ".m4a", ".ogg", ".webm"
+        };
 
         public ChatService(AppDbContext context, IOptions<GeminiOptions> geminiOptions)
         {
@@ -168,6 +216,144 @@ namespace ChatbotAPI.Services
             sessao.DocumentContext = null;
             await _context.SaveChangesAsync();
             return true;
+        }
+
+        public async Task<AudioTranscriptionResponse> TranscribeAudioAsync(int sessionId, IFormFile audio)
+        {
+            if (audio is null || audio.Length <= 0)
+            {
+                return new AudioTranscriptionResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Nenhum áudio foi enviado."
+                };
+            }
+
+            if (audio.Length > MaxAudioSizeBytes)
+            {
+                return new AudioTranscriptionResponse
+                {
+                    Success = false,
+                    ErrorMessage = "O áudio excede o limite de 15 MB por envio."
+                };
+            }
+
+            var sessaoExists = await _context.ChatSessions.AnyAsync(s => s.Id == sessionId);
+            if (!sessaoExists)
+            {
+                return new AudioTranscriptionResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Sessão não encontrada."
+                };
+            }
+
+            var extension = Path.GetExtension(audio.FileName).ToLowerInvariant();
+            if (!AllowedAudioExtensions.Contains(extension))
+            {
+                return new AudioTranscriptionResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Formato de áudio não suportado. Use WAV, MP3, M4A, OGG ou WEBM."
+                };
+            }
+
+            if (string.IsNullOrWhiteSpace(_geminiOptions.ApiKey))
+            {
+                return new AudioTranscriptionResponse
+                {
+                    Success = false,
+                    ErrorMessage = "A chave do Gemini não foi configurada."
+                };
+            }
+
+            await using var audioStream = audio.OpenReadStream();
+            await using var memoryStream = new MemoryStream();
+            await audioStream.CopyToAsync(memoryStream);
+            var base64Audio = Convert.ToBase64String(memoryStream.ToArray());
+
+            var mimeType = ResolveAudioMimeType(audio.FileName, audio.ContentType);
+
+            var payload = new GeminiGenerateContentRequest
+            {
+                Contents = new List<GeminiContent>
+                {
+                    new GeminiContent
+                    {
+                        Role = "user",
+                        Parts = new List<GeminiContentPart>
+                        {
+                            new GeminiContentPart
+                            {
+                                Text = "Transcreva o áudio para texto em português do Brasil. Responda apenas com a transcrição, sem comentários."
+                            },
+                            new GeminiContentPart
+                            {
+                                InlineData = new GeminiInlineData
+                                {
+                                    MimeType = mimeType,
+                                    Data = base64Audio
+                                }
+                            }
+                        }
+                    }
+                },
+                GenerationConfig = new { temperature = 0.0 }
+            };
+
+            string url = $"{_geminiOptions.BaseUrl}/{_geminiOptions.Model}:generateContent?key={_geminiOptions.ApiKey}";
+
+            try
+            {
+                using var httpClient = new HttpClient();
+                var jsonEnviado = JsonSerializer.Serialize(payload);
+                var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
+
+                var response = await httpClient.PostAsync(url, content);
+                var jsonRetornado = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return new AudioTranscriptionResponse
+                    {
+                        Success = false,
+                        ErrorMessage = string.IsNullOrWhiteSpace(jsonRetornado)
+                            ? $"Não foi possível transcrever o áudio no momento. ({(int)response.StatusCode} {response.ReasonPhrase})"
+                            : $"Não foi possível transcrever o áudio no momento. {jsonRetornado}"
+                    };
+                }
+
+                using var doc = JsonDocument.Parse(jsonRetornado);
+                var transcript = doc.RootElement
+                    .GetProperty("candidates")[0]
+                    .GetProperty("content")
+                    .GetProperty("parts")[0]
+                    .GetProperty("text")
+                    .GetString();
+
+                if (string.IsNullOrWhiteSpace(transcript))
+                {
+                    return new AudioTranscriptionResponse
+                    {
+                        Success = false,
+                        ErrorMessage = "Não foi possível entender o áudio enviado."
+                    };
+                }
+
+                return new AudioTranscriptionResponse
+                {
+                    Success = true,
+                    Transcript = transcript.Trim()
+                };
+            }
+            catch
+            {
+                return new AudioTranscriptionResponse
+                {
+                    Success = false,
+                    ErrorMessage = "Erro ao processar o áudio. Tente novamente."
+                };
+            }
         }
 
         public async Task<ChatResponse> SendMessageAsync(MensagemRequest request)
@@ -372,6 +558,24 @@ namespace ChatbotAPI.Services
             }
 
             return builder.ToString().Trim();
+        }
+
+        private static string ResolveAudioMimeType(string fileName, string? contentType)
+        {
+            var extension = Path.GetExtension(fileName).ToLowerInvariant();
+            var normalizedContentType = string.IsNullOrWhiteSpace(contentType)
+                ? string.Empty
+                : contentType.Split(';', StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+
+            return extension switch
+            {
+                ".wav" => "audio/wav",
+                ".mp3" => "audio/mpeg",
+                ".m4a" => "audio/mp4",
+                ".ogg" => "audio/ogg",
+                ".webm" => "audio/webm",
+                _ => string.IsNullOrWhiteSpace(normalizedContentType) ? "audio/webm" : normalizedContentType,
+            };
         }
 
         private static string TrimDocumentContext(string text)
