@@ -1,0 +1,503 @@
+# Apresentacao da Aplicacao
+
+## Visao geral
+
+Esta aplicacao e um chatbot com interface web que combina:
+
+- frontend em React + TypeScript + Vite
+- backend em ASP.NET Core
+- persistencia em SQL Server com Entity Framework Core
+- integracao com a API Gemini para gerar respostas, transcrever audio, sugerir perguntas e montar resumos
+
+O sistema permite criar sessoes de conversa, enviar mensagens, anexar documentos PDF/TXT, mandar audio para transcricao e exportar um resumo final em PDF.
+
+## Esqueleto geral
+
+O projeto esta dividido em duas partes principais:
+
+```text
+ChatbotAPI/
+|- ChatbotAPI/           -> backend .NET
+|- chatbot-frontend/     -> frontend React
+|- docker-compose.yml    -> sobe banco, backend e frontend
+```
+
+Fluxo de alto nivel:
+
+1. O usuario interage com a interface React.
+2. O frontend chama a API pelo hook `useChatAPI`.
+3. O `ChatController` recebe as requisicoes HTTP.
+4. O `ChatService` executa a regra de negocio.
+5. O `AppDbContext` salva e consulta sessoes e mensagens no SQL Server.
+6. Quando necessario, o `ChatService` chama o Gemini.
+7. A resposta volta para o frontend e e exibida ao usuario.
+
+## Backend
+
+### Arquivos e classes principais
+
+#### `Program.cs`
+
+Responsavel por inicializar a API.
+
+Funcoes principais:
+
+- registra controllers
+- habilita OpenAPI no ambiente de desenvolvimento
+- configura CORS para permitir chamadas do frontend
+- le a connection string `DefaultConnection`
+- registra o `AppDbContext` com SQL Server
+- faz o bind da secao `Gemini` para `GeminiOptions`
+- injeta `IChatService` com implementacao `ChatService`
+
+#### `Data/AppDbContext.cs`
+
+Contexto do Entity Framework Core.
+
+Tabelas mapeadas:
+
+- `ChatSessions`
+- `ChatMessages`
+
+Ele representa a porta de acesso ao banco de dados usada pelos services.
+
+#### `Models/ChatSession.cs`
+
+Representa uma sessao de conversa.
+
+Campos principais:
+
+- `Id`: identificador da sessao
+- `SystemPrompt`: instrucoes base da sessao
+- `DocumentName`: nome do documento anexado
+- `DocumentContext`: texto extraido do documento
+- `CreatedAt`: data de criacao
+- `Messages`: colecao de mensagens da sessao
+
+#### `Models/ChatMessage.cs`
+
+Representa uma mensagem da conversa.
+
+Campos principais:
+
+- `Id`
+- `SessionId`
+- `Role`: indica se a mensagem veio do usuario ou do assistente
+- `Content`
+- `CreatedAt`
+- `Session`: navegacao para a sessao relacionada
+
+#### `Models/MensagemRequest.cs`
+
+DTO recebido na rota de envio de mensagem.
+
+Campos:
+
+- `SessionId`
+- `Texto`
+
+#### `Options/GeminiOptions.cs`
+
+Classe de configuracao da integracao com o Gemini.
+
+Campos:
+
+- `ApiKey`
+- `Model`
+- `BaseUrl`
+
+Essa classe recebe seus valores a partir da secao `Gemini` do `appsettings.json` ou de variaveis de ambiente.
+
+#### `Controllers/ChatController.cs`
+
+Controller principal da API.
+
+Responsabilidade:
+
+- expor as rotas HTTP
+- validar o resultado retornado pelo service
+- transformar o resultado em `Ok`, `BadRequest`, `NotFound` ou download de arquivo
+
+Ele nao concentra a regra de negocio. Essa regra fica no `ChatService`.
+
+#### `Services/IChatService.cs`
+
+Contrato da camada de negocio.
+
+Metodos expostos:
+
+- `CreateSessionAsync`
+- `UploadDocumentsAsync`
+- `TranscribeAudioAsync`
+- `ClearDocumentsAsync`
+- `SendMessageAsync`
+- `ExportSummaryPdfAsync`
+
+#### `Services/ChatService.cs`
+
+E o coracao da aplicacao no backend.
+
+Responsabilidades principais:
+
+- criar sessoes
+- validar upload de documentos
+- extrair texto de PDF e TXT
+- armazenar contexto de documento na sessao
+- gerar perguntas sugeridas com base no documento
+- enviar historico da conversa para o Gemini
+- transcrever audio com o Gemini
+- gerar resumo final da conversa
+- montar o conteudo do PDF exportado
+
+Metodos publicos mais importantes:
+
+- `CreateSessionAsync`: cria uma sessao nova no banco
+- `UploadDocumentsAsync`: recebe arquivos, valida tamanho, extrai texto e salva contexto
+- `ClearDocumentsAsync`: remove documento e contexto da sessao
+- `TranscribeAudioAsync`: envia audio para o Gemini e devolve a transcricao
+- `SendMessageAsync`: salva a mensagem do usuario, monta o historico, chama o Gemini e salva a resposta
+- `ExportSummaryPdfAsync`: monta um resumo da conversa e devolve o PDF pronto para download
+
+Metodos auxiliares relevantes:
+
+- `BuildSystemPrompt`: junta o prompt da sessao com o contexto do documento
+- `ExtractDocumentTextAsync`: decide como extrair o texto de acordo com a extensao
+- `ReadPlainTextAsync`: le arquivos `.txt`
+- `ReadPdfTextAsync`: extrai texto de arquivos `.pdf`
+- `GenerateSuggestedQuestionsAsync`: pede ao Gemini tres perguntas sugeridas
+- `GenerateSummaryMarkdownAsync`: pede ao Gemini um resumo estruturado em markdown
+- `BuildFallbackSummaryMarkdown`: gera um resumo de fallback quando a IA falha
+
+Classes auxiliares declaradas dentro do `ChatService`:
+
+- `ChatResponse`: retorno padrao para resposta de mensagem
+- `DocumentUploadResponse`: retorno do upload de documentos
+- `SummaryExportResponse`: retorno da exportacao do resumo
+- `AudioTranscriptionResponse`: retorno da transcricao de audio
+- `GeminiContentPart`
+- `GeminiInlineData`
+- `GeminiContent`
+- `GeminiGenerateContentRequest`
+
+As quatro ultimas servem para montar o payload enviado para o Gemini.
+
+#### `Services/SimplePdfWriter.cs`
+
+Classe utilitaria responsavel por gerar o PDF do resumo usando QuestPDF.
+
+Responsabilidades:
+
+- configurar a pagina A4
+- montar cabecalho, conteudo e rodape
+- interpretar um markdown simples
+- transformar titulos, subtitulos, bullets e paragrafos em blocos de PDF
+
+#### `Migrations/`
+
+Contem o historico das migracoes do banco.
+
+Migracoes presentes:
+
+- `BancoInicial`
+- `AddDocumentContext`
+
+Essas migracoes registram a evolucao do schema da aplicacao.
+
+## Rotas da API
+
+Base da controller:
+
+```text
+/api/chat
+```
+
+### `POST /api/chat/nova-sessao`
+
+Objetivo:
+
+- criar uma nova sessao de chat
+
+Entrada:
+
+- corpo contendo uma `string` com o `systemPrompt`
+
+Saida:
+
+- `sessionId`
+
+### `POST /api/chat/sessao/{sessionId}/documento`
+
+Objetivo:
+
+- anexar um ou mais documentos na sessao
+
+Entrada:
+
+- `sessionId` na rota
+- arquivos enviados em `multipart/form-data` no campo `documentos`
+
+Saida:
+
+- `documentName`
+- `extractedCharacters`
+- `suggestedQuestions`
+
+### `DELETE /api/chat/sessao/{sessionId}/documento`
+
+Objetivo:
+
+- remover o documento ativo e o contexto textual da sessao
+
+Saida:
+
+- confirmacao de remocao
+
+### `POST /api/chat/sessao/{sessionId}/audio`
+
+Objetivo:
+
+- transcrever um audio enviado pelo usuario
+
+Entrada:
+
+- `sessionId`
+- arquivo de audio no campo `audio`
+
+Saida:
+
+- `transcript`
+
+### `POST /api/chat/enviar-mensagem`
+
+Objetivo:
+
+- enviar mensagem para a IA e receber resposta
+
+Entrada:
+
+```json
+{
+  "sessionId": 1,
+  "texto": "Sua pergunta aqui"
+}
+```
+
+Saida:
+
+- `resposta`
+
+### `POST /api/chat/sessao/{sessionId}/encerrar-e-exportar-resumo`
+
+Objetivo:
+
+- gerar um resumo da sessao e baixar um PDF
+
+Saida:
+
+- arquivo PDF como download
+
+## Frontend
+
+### Estrutura principal
+
+#### `src/main.tsx`
+
+Ponto de entrada da aplicacao React.
+
+#### `src/App.tsx`
+
+Componente raiz.
+
+Responsabilidades:
+
+- carregar o estado persistido do navegador
+- manter a lista de sessoes
+- manter as mensagens por sessao
+- controlar qual sessao esta ativa
+- abrir o modal de nova sessao
+- renderizar a sidebar e a janela principal de chat
+
+Tambem oferece sugestoes de tipos de sessao, como conversa com PDF, programacao C#/.NET e revisor academico.
+
+#### `src/hooks/useChatAPI.ts`
+
+Hook que centraliza todas as chamadas para a API.
+
+Metodos principais:
+
+- `criarSessao`
+- `anexarDocumento`
+- `removerDocumento`
+- `enviarMensagem`
+- `transcreverAudio`
+- `exportarResumo`
+
+Beneficios:
+
+- evita repetir `fetch` em varios componentes
+- centraliza tratamento de erro
+- centraliza estado de carregamento
+
+#### `src/config/api.ts`
+
+Define a URL base da API:
+
+- usa `VITE_API_BASE_URL` se existir
+- caso contrario usa `http://localhost:5283/api`
+
+#### `src/types/chat.ts`
+
+Define os tipos do frontend:
+
+- `ChatSession`
+- `ChatMessage`
+- `ChatLocalStorage`
+- `MessageRequest`
+- `ApiResponse`
+
+#### `src/utils/chatCache.ts`
+
+Gerencia a persistencia local das conversas no navegador.
+
+Responsabilidades:
+
+- salvar o estado no `localStorage`
+- recuperar sessoes e mensagens
+- validar estrutura dos dados salvos
+- criar um `localSessionId`
+- expirar cache antigo apos alguns dias
+
+### Componentes principais
+
+#### `components/SessionList.tsx`
+
+Sidebar com a lista de sessoes.
+
+Responsabilidades:
+
+- mostrar conversas salvas
+- abrir nova sessao
+- acionar exclusao de conversa
+
+#### `components/SessionItem.tsx`
+
+Representa um item individual da sidebar.
+
+Mostra:
+
+- titulo derivado do prompt
+- data
+- documento vinculado, quando existir
+
+#### `components/ChatWindow.tsx`
+
+Componente central da experiencia de conversa.
+
+Responsabilidades:
+
+- enviar mensagem
+- animar a resposta do assistente
+- anexar documentos
+- remover documento
+- transcrever audio
+- exibir perguntas sugeridas
+- exportar resumo em PDF
+
+#### `components/MessageList.tsx`
+
+Renderiza a lista de mensagens e controla o auto-scroll.
+
+Tambem mostra:
+
+- documento ativo
+- estado de digitacao do bot
+
+#### `components/MessageItem.tsx`
+
+Renderiza uma mensagem individual.
+
+Diferenciais:
+
+- mensagens do bot aceitam markdown
+- botao para copiar resposta do assistente
+
+#### `components/InputArea.tsx`
+
+Area de entrada da conversa.
+
+Responsabilidades:
+
+- digitar mensagem
+- enviar documento PDF/TXT
+- enviar audio de arquivo
+- gravar audio pelo navegador
+- remover documento atual
+
+#### `components/NewSessionModal.tsx`
+
+Modal para criar uma nova sessao manualmente com um `systemPrompt`.
+
+#### `components/Modal.tsx`
+
+Componente reutilizavel de modal com animacao usando Framer Motion.
+
+## Fluxo de uma mensagem
+
+1. O usuario digita a pergunta no `InputArea`.
+2. O `ChatWindow` cria a mensagem local do usuario.
+3. O `ChatWindow` chama `useChatAPI.enviarMensagem`.
+4. O frontend envia `POST /api/chat/enviar-mensagem`.
+5. O `ChatController` delega para `ChatService.SendMessageAsync`.
+6. O service salva a mensagem no banco.
+7. O service recupera o historico da sessao.
+8. O service monta o `systemPrompt`, incluindo documento se existir.
+9. O service chama a API Gemini.
+10. O service salva a resposta da IA no banco.
+11. O frontend recebe a resposta e a exibe com animacao.
+
+## Fluxo de documento
+
+1. O usuario anexa um PDF ou TXT.
+2. O frontend envia os arquivos para `POST /api/chat/sessao/{sessionId}/documento`.
+3. O `ChatService` valida extensao e tamanho.
+4. O texto e extraido do arquivo.
+5. O texto vira `DocumentContext` da sessao.
+6. O Gemini pode sugerir perguntas baseadas nesse contexto.
+7. As proximas respostas do chat passam a considerar o documento como contexto principal.
+
+## Dependencias importantes
+
+Backend:
+
+- `Microsoft.EntityFrameworkCore.SqlServer`
+- `Microsoft.EntityFrameworkCore.Tools`
+- `QuestPDF`
+- `UglyToad.PdfPig`
+
+Frontend:
+
+- `react`
+- `vite`
+- `tailwindcss`
+- `framer-motion`
+- `react-markdown`
+- `@heroicons/react`
+
+## Pontos fortes da arquitetura
+
+- separacao clara entre frontend, controller, service e persistencia
+- service centralizando a regra de negocio
+- persistencia local no frontend para melhorar experiencia do usuario
+- uso de contexto documental para respostas mais guiadas
+- exportacao de resumo em PDF como funcionalidade de fechamento de conversa
+
+## Resumo final
+
+O projeto segue uma arquitetura simples e clara:
+
+- o frontend cuida da experiencia e do estado local
+- o backend expone rotas e concentra a logica de negocio
+- o banco guarda sessoes e mensagens
+- o Gemini acrescenta inteligencia generativa, transcricao e sumarizacao
+
+Isso torna a aplicacao adequada para demonstracoes, evolucao incremental e separacao de responsabilidades entre interface, API e integracao com IA.

@@ -4,8 +4,14 @@ using QuestPDF.Infrastructure;
 
 namespace ChatbotAPI.Services
 {
+    /// <summary>
+    /// Utilitario simples para transformar um markdown resumido em PDF.
+    /// </summary>
     public static class SimplePdfWriter
     {
+        /// <summary>
+        /// Monta o documento final com cabecalho, conteudo e rodape.
+        /// </summary>
         public static byte[] BuildSummaryPdf(string title, string subtitle, string markdownContent, string footerText)
         {
             QuestPDF.Settings.License = LicenseType.Community;
@@ -40,7 +46,7 @@ namespace ChatbotAPI.Services
                                     column.Item().Text(block.Text).FontSize(13).SemiBold().FontColor("#2563EB");
                                     break;
                                 case MarkdownBlockKind.Bullet:
-                                    column.Item().PaddingLeft(10).Text($"• {block.Text}").FontSize(11).FontColor("#334155");
+                                    column.Item().PaddingLeft(10).Text($"- {block.Text}").FontSize(11).FontColor("#334155");
                                     break;
                                 case MarkdownBlockKind.Paragraph:
                                 default:
@@ -59,6 +65,9 @@ namespace ChatbotAPI.Services
             return document.GeneratePdf();
         }
 
+        /// <summary>
+        /// Quebra o markdown em blocos simples para renderizar titulo, subtitulo, lista e paragrafo.
+        /// </summary>
         private static List<MarkdownBlock> ParseMarkdownBlocks(string markdown)
         {
             var blocks = new List<MarkdownBlock>();

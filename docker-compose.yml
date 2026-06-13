@@ -1,0 +1,25 @@
+version: '3.8'
+services:
+  database:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=Ma@25456924
+    ports:
+      - "1433:1433"
+
+  backend:
+    build: ./ChatbotAPI
+    ports:
+      - "5283:8080"
+    depends_on:
+      - database
+    environment:
+      - ConnectionStrings__DefaultConnection=Server=database;Database=ChatbotDb;User Id=sa;Password=Ma@25456924;TrustServerCertificate=True
+
+  frontend:
+    build: ./chatbot-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend

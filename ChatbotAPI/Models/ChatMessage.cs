@@ -1,5 +1,9 @@
-﻿namespace ChatbotAPI.Models
+namespace ChatbotAPI.Models
 {
+    /// <summary>
+    /// Representa uma mensagem individual dentro de uma sessao.
+    /// Pode ser uma fala do usuario ou uma resposta do assistente.
+    /// </summary>
     public class ChatMessage
     {
         public int Id { get; set; }
@@ -8,7 +12,7 @@
         public string Content { get; set; } = string.Empty;
         public DateTime CreatedAt { get; set; } = DateTime.Now;
 
-        // Relacionamento com a sessão
+        // Navegacao para a sessao dona desta mensagem.
         public ChatSession? Session { get; set; }
     }
 }

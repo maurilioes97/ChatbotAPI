@@ -1,17 +1,18 @@
+using ChatbotAPI.Clients;
+using ChatbotAPI.Contracts.Requests;
 using ChatbotAPI.Data;
 using ChatbotAPI.Models;
-using ChatbotAPI.Options;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 using System.IO;
 using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
-using UglyToad.PdfPig;
 
 namespace ChatbotAPI.Services
 {
+    /// <summary>
+    /// Resultado interno usado quando a API gera uma resposta de chat.
+    /// </summary>
     public class ChatResponse
     {
         public bool Success { get; set; }
@@ -19,6 +20,9 @@ namespace ChatbotAPI.Services
         public string? ErrorMessage { get; set; }
     }
 
+    /// <summary>
+    /// Resultado interno usado no fluxo de upload e processamento de documentos.
+    /// </summary>
     public class DocumentUploadResponse
     {
         public bool Success { get; set; }
@@ -28,6 +32,9 @@ namespace ChatbotAPI.Services
         public string? ErrorMessage { get; set; }
     }
 
+    /// <summary>
+    /// Resultado interno usado quando a aplicacao gera o PDF final do resumo.
+    /// </summary>
     public class SummaryExportResponse
     {
         public bool Success { get; set; }
@@ -36,6 +43,9 @@ namespace ChatbotAPI.Services
         public string? ErrorMessage { get; set; }
     }
 
+    /// <summary>
+    /// Resultado interno do fluxo de transcricao de audio.
+    /// </summary>
     public class AudioTranscriptionResponse
     {
         public bool Success { get; set; }
@@ -43,61 +53,37 @@ namespace ChatbotAPI.Services
         public string? ErrorMessage { get; set; }
     }
 
-    public class GeminiContentPart
-    {
-        [System.Text.Json.Serialization.JsonPropertyName("text")]
-        public string? Text { get; set; }
-
-        [System.Text.Json.Serialization.JsonPropertyName("inline_data")]
-        public GeminiInlineData? InlineData { get; set; }
-    }
-
-    public class GeminiInlineData
-    {
-        [System.Text.Json.Serialization.JsonPropertyName("mime_type")]
-        public string MimeType { get; set; } = string.Empty;
-
-        [System.Text.Json.Serialization.JsonPropertyName("data")]
-        public string Data { get; set; } = string.Empty;
-    }
-
-    public class GeminiContent
-    {
-        [System.Text.Json.Serialization.JsonPropertyName("role")]
-        public string Role { get; set; } = "user";
-
-        [System.Text.Json.Serialization.JsonPropertyName("parts")]
-        public List<GeminiContentPart> Parts { get; set; } = new();
-    }
-
-    public class GeminiGenerateContentRequest
-    {
-        [System.Text.Json.Serialization.JsonPropertyName("contents")]
-        public List<GeminiContent> Contents { get; set; } = new();
-
-        [System.Text.Json.Serialization.JsonPropertyName("generationConfig")]
-        public object? GenerationConfig { get; set; }
-    }
-
+    /// <summary>
+    /// Service principal da aplicacao.
+    /// Ele coordena banco, documentos, Gemini e geracao de resumo.
+    /// </summary>
     public class ChatService : IChatService
     {
         private readonly AppDbContext _context;
-        private readonly GeminiOptions _geminiOptions;
-        private const int MaxDocumentContextChars = 50000;
-        private const long MaxFileSizeBytes = 10L * 1024 * 1024;
-        private const long MaxTotalUploadBytes = 20L * 1024 * 1024;
+        private readonly IDocumentService _documentService;
+        private readonly IGeminiClient _geminiClient;
         private const long MaxAudioSizeBytes = 15L * 1024 * 1024;
         private static readonly HashSet<string> AllowedAudioExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
             ".wav", ".mp3", ".m4a", ".ogg", ".webm"
         };
 
-        public ChatService(AppDbContext context, IOptions<GeminiOptions> geminiOptions)
+        /// <summary>
+        /// Recebe as dependencias centrais usadas no fluxo do chat.
+        /// </summary>
+        public ChatService(
+            AppDbContext context,
+            IDocumentService documentService,
+            IGeminiClient geminiClient)
         {
             _context = context;
-            _geminiOptions = geminiOptions.Value;
+            _documentService = documentService;
+            _geminiClient = geminiClient;
         }
 
+        /// <summary>
+        /// Cria uma nova sessao e salva o prompt base que guiara o assistente.
+        /// </summary>
         public async Task<int> CreateSessionAsync(string systemPrompt)
         {
             var sessao = new ChatSession { SystemPrompt = systemPrompt };
@@ -106,90 +92,33 @@ namespace ChatbotAPI.Services
             return sessao.Id;
         }
 
+        /// <summary>
+        /// Processa os documentos enviados e salva o contexto extraido na sessao.
+        /// </summary>
         public async Task<DocumentUploadResponse> UploadDocumentsAsync(int sessionId, IEnumerable<IFormFile> documents)
         {
-            var validDocuments = documents?
-                .Where(document => document is not null && document.Length > 0)
-                .ToList() ?? new List<IFormFile>();
-
-            if (validDocuments.Count == 0)
-            {
-                return new DocumentUploadResponse
-                {
-                    Success = false,
-                    ErrorMessage = "Nenhum arquivo foi enviado."
-                };
-            }
-
-            var oversizedDocument = validDocuments.FirstOrDefault(document => document.Length > MaxFileSizeBytes);
-            if (oversizedDocument is not null)
-            {
-                return new DocumentUploadResponse
-                {
-                    Success = false,
-                    ErrorMessage = $"O arquivo '{oversizedDocument.FileName}' excede o limite de 10 MB por arquivo."
-                };
-            }
-
-            var totalBytes = validDocuments.Sum(document => document.Length);
-            if (totalBytes > MaxTotalUploadBytes)
-            {
-                return new DocumentUploadResponse
-                {
-                    Success = false,
-                    ErrorMessage = "O total dos arquivos excede o limite de 20 MB por envio."
-                };
-            }
-
             var sessao = await _context.ChatSessions.FindAsync(sessionId);
             if (sessao is null)
             {
                 return new DocumentUploadResponse
                 {
                     Success = false,
-                    ErrorMessage = "Sessão não encontrada."
+                    ErrorMessage = "Sessao nao encontrada."
                 };
             }
 
-            var documentParts = new List<string>();
-            var documentNames = new List<string>();
-            var totalCharacters = 0;
-
-            foreach (var document in validDocuments)
+            var documentProcessing = await _documentService.ProcessDocumentsAsync(documents);
+            if (!documentProcessing.Success)
             {
-                string extractedText;
-                try
+                return new DocumentUploadResponse
                 {
-                    extractedText = await ExtractDocumentTextAsync(document);
-                }
-                catch (Exception ex)
-                {
-                    return new DocumentUploadResponse
-                    {
-                        Success = false,
-                        ErrorMessage = string.IsNullOrWhiteSpace(ex.Message)
-                            ? $"Falha ao ler o arquivo '{document.FileName}'."
-                            : $"{document.FileName}: {ex.Message}"
-                    };
-                }
-
-                if (string.IsNullOrWhiteSpace(extractedText))
-                {
-                    return new DocumentUploadResponse
-                    {
-                        Success = false,
-                        ErrorMessage = $"Não foi possível extrair texto do documento '{document.FileName}'."
-                    };
-                }
-
-                var trimmedText = TrimDocumentContext(extractedText);
-                documentParts.Add($"### {document.FileName}\n{trimmedText}");
-                documentNames.Add(document.FileName);
-                totalCharacters += trimmedText.Length;
+                    Success = false,
+                    ErrorMessage = documentProcessing.ErrorMessage
+                };
             }
 
-            sessao.DocumentName = string.Join(", ", documentNames);
-            sessao.DocumentContext = TrimDocumentContext(string.Join("\n\n", documentParts));
+            sessao.DocumentName = documentProcessing.DocumentName;
+            sessao.DocumentContext = documentProcessing.DocumentContext;
 
             var suggestedQuestions = await GenerateSuggestedQuestionsAsync(sessao);
 
@@ -199,11 +128,14 @@ namespace ChatbotAPI.Services
             {
                 Success = true,
                 DocumentName = sessao.DocumentName,
-                ExtractedCharacters = totalCharacters,
+                ExtractedCharacters = documentProcessing.ExtractedCharacters,
                 SuggestedQuestions = suggestedQuestions
             };
         }
 
+        /// <summary>
+        /// Remove o documento vinculado a uma sessao existente.
+        /// </summary>
         public async Task<bool> ClearDocumentsAsync(int sessionId)
         {
             var sessao = await _context.ChatSessions.FindAsync(sessionId);
@@ -218,6 +150,9 @@ namespace ChatbotAPI.Services
             return true;
         }
 
+        /// <summary>
+        /// Valida e transcreve um audio enviado pelo usuario.
+        /// </summary>
         public async Task<AudioTranscriptionResponse> TranscribeAudioAsync(int sessionId, IFormFile audio)
         {
             if (audio is null || audio.Length <= 0)
@@ -225,7 +160,7 @@ namespace ChatbotAPI.Services
                 return new AudioTranscriptionResponse
                 {
                     Success = false,
-                    ErrorMessage = "Nenhum áudio foi enviado."
+                    ErrorMessage = "Nenhum audio foi enviado."
                 };
             }
 
@@ -234,7 +169,7 @@ namespace ChatbotAPI.Services
                 return new AudioTranscriptionResponse
                 {
                     Success = false,
-                    ErrorMessage = "O áudio excede o limite de 15 MB por envio."
+                    ErrorMessage = "O audio excede o limite de 15 MB por envio."
                 };
             }
 
@@ -244,7 +179,7 @@ namespace ChatbotAPI.Services
                 return new AudioTranscriptionResponse
                 {
                     Success = false,
-                    ErrorMessage = "Sessão não encontrada."
+                    ErrorMessage = "Sessao nao encontrada."
                 };
             }
 
@@ -254,16 +189,16 @@ namespace ChatbotAPI.Services
                 return new AudioTranscriptionResponse
                 {
                     Success = false,
-                    ErrorMessage = "Formato de áudio não suportado. Use WAV, MP3, M4A, OGG ou WEBM."
+                    ErrorMessage = "Formato de audio nao suportado. Use WAV, MP3, M4A, OGG ou WEBM."
                 };
             }
 
-            if (string.IsNullOrWhiteSpace(_geminiOptions.ApiKey))
+            if (!_geminiClient.IsConfigured)
             {
                 return new AudioTranscriptionResponse
                 {
                     Success = false,
-                    ErrorMessage = "A chave do Gemini não foi configurada."
+                    ErrorMessage = "A chave do Gemini nao foi configurada."
                 };
             }
 
@@ -273,92 +208,31 @@ namespace ChatbotAPI.Services
             var base64Audio = Convert.ToBase64String(memoryStream.ToArray());
 
             var mimeType = ResolveAudioMimeType(audio.FileName, audio.ContentType);
+            var transcriptionResult = await _geminiClient.TranscribeAudioAsync(base64Audio, mimeType);
 
-            var payload = new GeminiGenerateContentRequest
-            {
-                Contents = new List<GeminiContent>
-                {
-                    new GeminiContent
-                    {
-                        Role = "user",
-                        Parts = new List<GeminiContentPart>
-                        {
-                            new GeminiContentPart
-                            {
-                                Text = "Transcreva o áudio para texto em português do Brasil. Responda apenas com a transcrição, sem comentários."
-                            },
-                            new GeminiContentPart
-                            {
-                                InlineData = new GeminiInlineData
-                                {
-                                    MimeType = mimeType,
-                                    Data = base64Audio
-                                }
-                            }
-                        }
-                    }
-                },
-                GenerationConfig = new { temperature = 0.0 }
-            };
-
-            string url = $"{_geminiOptions.BaseUrl}/{_geminiOptions.Model}:generateContent?key={_geminiOptions.ApiKey}";
-
-            try
-            {
-                using var httpClient = new HttpClient();
-                var jsonEnviado = JsonSerializer.Serialize(payload);
-                var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
-
-                var response = await httpClient.PostAsync(url, content);
-                var jsonRetornado = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    return new AudioTranscriptionResponse
-                    {
-                        Success = false,
-                        ErrorMessage = string.IsNullOrWhiteSpace(jsonRetornado)
-                            ? $"Não foi possível transcrever o áudio no momento. ({(int)response.StatusCode} {response.ReasonPhrase})"
-                            : $"Não foi possível transcrever o áudio no momento. {jsonRetornado}"
-                    };
-                }
-
-                using var doc = JsonDocument.Parse(jsonRetornado);
-                var transcript = doc.RootElement
-                    .GetProperty("candidates")[0]
-                    .GetProperty("content")
-                    .GetProperty("parts")[0]
-                    .GetProperty("text")
-                    .GetString();
-
-                if (string.IsNullOrWhiteSpace(transcript))
-                {
-                    return new AudioTranscriptionResponse
-                    {
-                        Success = false,
-                        ErrorMessage = "Não foi possível entender o áudio enviado."
-                    };
-                }
-
-                return new AudioTranscriptionResponse
-                {
-                    Success = true,
-                    Transcript = transcript.Trim()
-                };
-            }
-            catch
+            if (!transcriptionResult.Success || string.IsNullOrWhiteSpace(transcriptionResult.Text))
             {
                 return new AudioTranscriptionResponse
                 {
                     Success = false,
-                    ErrorMessage = "Erro ao processar o áudio. Tente novamente."
+                    ErrorMessage = string.IsNullOrWhiteSpace(transcriptionResult.ErrorMessage)
+                        ? "Nao foi possivel entender o audio enviado."
+                        : transcriptionResult.ErrorMessage
                 };
             }
+
+            return new AudioTranscriptionResponse
+            {
+                Success = true,
+                Transcript = transcriptionResult.Text
+            };
         }
 
-        public async Task<ChatResponse> SendMessageAsync(MensagemRequest request)
+        /// <summary>
+        /// Registra a mensagem do usuario, consulta o Gemini e grava a resposta no historico.
+        /// </summary>
+        public async Task<ChatResponse> SendMessageAsync(SendMessageRequest request)
         {
-            // Salva a mensagem do usuário
             var mensagemUsuario = new ChatMessage
             {
                 SessionId = request.SessionId,
@@ -368,14 +242,13 @@ namespace ChatbotAPI.Services
             _context.ChatMessages.Add(mensagemUsuario);
             await _context.SaveChangesAsync();
 
-            // Busca sessão e histórico
             var sessao = await _context.ChatSessions.FindAsync(request.SessionId);
             if (sessao is null)
             {
                 return new ChatResponse
                 {
                     Success = false,
-                    ErrorMessage = "Sessão não encontrada."
+                    ErrorMessage = "Sessao nao encontrada."
                 };
             }
 
@@ -386,67 +259,48 @@ namespace ChatbotAPI.Services
 
             var systemPrompt = BuildSystemPrompt(sessao);
 
-            // Monta payload
-            var conteudos = new List<object>();
-            foreach (var msg in historico)
-            {
-                string roleGemini = msg.Role == "User" ? "user" : "model";
-                conteudos.Add(new { role = roleGemini, parts = new[] { new { text = msg.Content } } });
-            }
-
-            var payload = new
-            {
-                systemInstruction = new { parts = new[] { new { text = systemPrompt } } },
-                contents = conteudos
-            };
-
-            if (string.IsNullOrWhiteSpace(_geminiOptions.ApiKey))
+            if (!_geminiClient.IsConfigured)
             {
                 return new ChatResponse
                 {
                     Success = false,
-                    ErrorMessage = "A chave do Gemini não foi configurada. Defina Gemini__ApiKey em variáveis de ambiente ou user-secrets."
+                    ErrorMessage = "A chave do Gemini nao foi configurada. Defina Gemini__ApiKey em variaveis de ambiente ou user-secrets."
                 };
             }
 
-            string url = $"{_geminiOptions.BaseUrl}/{_geminiOptions.Model}:generateContent?key={_geminiOptions.ApiKey}";
+            var mensagensGemini = historico
+                .Select(msg => new GeminiChatMessage
+                {
+                    Role = msg.Role == "User" ? "user" : "model",
+                    Content = msg.Content
+                })
+                .ToList();
 
-            using var httpClient = new HttpClient();
-            var jsonEnviado = JsonSerializer.Serialize(payload);
-            var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync(url, content);
-            var jsonRetornado = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
+            var chatResult = await _geminiClient.GenerateChatReplyAsync(systemPrompt, mensagensGemini);
+            if (!chatResult.Success || string.IsNullOrWhiteSpace(chatResult.Text))
             {
                 return new ChatResponse
                 {
                     Success = false,
-                    ErrorMessage = jsonRetornado
+                    ErrorMessage = chatResult.ErrorMessage
                 };
             }
-
-            using var doc = JsonDocument.Parse(jsonRetornado);
-            string respostaDaIA = doc.RootElement
-                .GetProperty("candidates")[0]
-                .GetProperty("content")
-                .GetProperty("parts")[0]
-                .GetProperty("text")
-                .GetString()!;
 
             var mensagemIA = new ChatMessage
             {
                 SessionId = request.SessionId,
                 Role = "Assistant",
-                Content = respostaDaIA
+                Content = chatResult.Text
             };
             _context.ChatMessages.Add(mensagemIA);
             await _context.SaveChangesAsync();
 
-            return new ChatResponse { Success = true, Response = respostaDaIA };
+            return new ChatResponse { Success = true, Response = chatResult.Text };
         }
 
+        /// <summary>
+        /// Gera um PDF com o resumo final da sessao e da conversa.
+        /// </summary>
         public async Task<SummaryExportResponse> ExportSummaryPdfAsync(int sessionId)
         {
             var sessao = await _context.ChatSessions.FindAsync(sessionId);
@@ -455,7 +309,7 @@ namespace ChatbotAPI.Services
                 return new SummaryExportResponse
                 {
                     Success = false,
-                    ErrorMessage = "Sessão não encontrada."
+                    ErrorMessage = "Sessao nao encontrada."
                 };
             }
 
@@ -469,7 +323,7 @@ namespace ChatbotAPI.Services
                 return new SummaryExportResponse
                 {
                     Success = false,
-                    ErrorMessage = "Não há conteúdo suficiente para gerar o resumo."
+                    ErrorMessage = "Nao ha conteudo suficiente para gerar o resumo."
                 };
             }
 
@@ -491,6 +345,9 @@ namespace ChatbotAPI.Services
             };
         }
 
+        /// <summary>
+        /// Monta o prompt final combinando prompt base e contexto do documento.
+        /// </summary>
         private static string BuildSystemPrompt(ChatSession sessao)
         {
             var partes = new List<string>();
@@ -503,8 +360,8 @@ namespace ChatbotAPI.Services
             if (!string.IsNullOrWhiteSpace(sessao.DocumentContext))
             {
                 partes.Add(
-                    "Use o conteúdo do documento abaixo como contexto principal para responder ao usuário. " +
-                    "Se a resposta não estiver no documento, diga isso com clareza e não invente informações.");
+                    "Use o conteudo do documento abaixo como contexto principal para responder ao usuario. " +
+                    "Se a resposta nao estiver no documento, diga isso com clareza e nao invente informacoes.");
 
                 if (!string.IsNullOrWhiteSpace(sessao.DocumentName))
                 {
@@ -517,49 +374,9 @@ namespace ChatbotAPI.Services
             return string.Join("\n\n", partes);
         }
 
-        private async Task<string> ExtractDocumentTextAsync(IFormFile document)
-        {
-            var extension = Path.GetExtension(document.FileName).ToLowerInvariant();
-
-            return extension switch
-            {
-                ".txt" => await ReadPlainTextAsync(document),
-                ".pdf" => await ReadPdfTextAsync(document),
-                _ => throw new InvalidOperationException("Formato não suportado. Use apenas arquivos TXT ou PDF.")
-            };
-        }
-
-        private static async Task<string> ReadPlainTextAsync(IFormFile document)
-        {
-            using var stream = document.OpenReadStream();
-            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-            return await reader.ReadToEndAsync();
-        }
-
-        private static async Task<string> ReadPdfTextAsync(IFormFile document)
-        {
-            await using var sourceStream = document.OpenReadStream();
-            await using var memoryStream = new MemoryStream();
-
-            await sourceStream.CopyToAsync(memoryStream);
-            memoryStream.Position = 0;
-
-            using var pdf = PdfDocument.Open(memoryStream);
-            var builder = new StringBuilder();
-
-            foreach (var page in pdf.GetPages())
-            {
-                var pageText = page.Text?.Trim();
-                if (!string.IsNullOrWhiteSpace(pageText))
-                {
-                    builder.AppendLine(pageText);
-                    builder.AppendLine();
-                }
-            }
-
-            return builder.ToString().Trim();
-        }
-
+        /// <summary>
+        /// Normaliza o mime type do audio para o formato esperado pela API.
+        /// </summary>
         private static string ResolveAudioMimeType(string fileName, string? contentType)
         {
             var extension = Path.GetExtension(fileName).ToLowerInvariant();
@@ -578,94 +395,52 @@ namespace ChatbotAPI.Services
             };
         }
 
-        private static string TrimDocumentContext(string text)
-        {
-            if (text.Length <= MaxDocumentContextChars)
-            {
-                return text;
-            }
-
-            return text[..MaxDocumentContextChars];
-        }
-
+        /// <summary>
+        /// Tenta gerar sugestoes de perguntas e cai para um plano B se a IA nao responder.
+        /// </summary>
         private async Task<List<string>> GenerateSuggestedQuestionsAsync(ChatSession sessao)
         {
-            if (string.IsNullOrWhiteSpace(_geminiOptions.ApiKey) || string.IsNullOrWhiteSpace(sessao.DocumentContext))
+            if (!_geminiClient.IsConfigured || string.IsNullOrWhiteSpace(sessao.DocumentContext))
             {
                 return GetFallbackQuestions(sessao);
             }
 
-            var prompt =
-                "Leia o documento abaixo e sugira exatamente 3 perguntas inteligentes que o usuário pode fazer sobre ele. " +
-                "As perguntas devem ser curtas, objetivas e diretamente relacionadas ao conteúdo. " +
-                "Responda somente com as 3 perguntas, uma por linha, sem numeração, sem marcadores e sem explicações.\n\n" +
-                sessao.DocumentContext;
-
-            var payload = new
-            {
-                contents = new[]
-                {
-                    new
-                    {
-                        role = "user",
-                        parts = new[] { new { text = prompt } }
-                    }
-                }
-            };
-
-            string url = $"{_geminiOptions.BaseUrl}/{_geminiOptions.Model}:generateContent?key={_geminiOptions.ApiKey}";
-
-            try
-            {
-                using var httpClient = new HttpClient();
-                var jsonEnviado = JsonSerializer.Serialize(payload);
-                var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
-
-                var response = await httpClient.PostAsync(url, content);
-                var jsonRetornado = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    return GetFallbackQuestions(sessao);
-                }
-
-                using var doc = JsonDocument.Parse(jsonRetornado);
-                var rawText = doc.RootElement
-                    .GetProperty("candidates")[0]
-                    .GetProperty("content")
-                    .GetProperty("parts")[0]
-                    .GetProperty("text")
-                    .GetString();
-
-                var questions = (rawText ?? string.Empty)
-                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(NormalizeSuggestedQuestion)
-                    .Where(question => !string.IsNullOrWhiteSpace(question))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .Take(3)
-                    .ToList();
-
-                if (questions.Count < 3)
-                {
-                    questions.AddRange(GetFallbackQuestions(sessao).Where(q => !questions.Contains(q, StringComparer.OrdinalIgnoreCase)));
-                }
-
-                return questions.Take(3).ToList();
-            }
-            catch
+            var result = await _geminiClient.GenerateSuggestedQuestionsAsync(sessao.DocumentContext);
+            if (!result.Success || string.IsNullOrWhiteSpace(result.Text))
             {
                 return GetFallbackQuestions(sessao);
             }
+
+            var questions = result.Text
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(NormalizeSuggestedQuestion)
+                .Where(question => !string.IsNullOrWhiteSpace(question))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(3)
+                .ToList();
+
+            if (questions.Count < 3)
+            {
+                questions.AddRange(GetFallbackQuestions(sessao).Where(q => !questions.Contains(q, StringComparer.OrdinalIgnoreCase)));
+            }
+
+            return questions.Take(3).ToList();
         }
 
+        /// <summary>
+        /// Limpa marcadores e numeracoes para deixar a pergunta final mais natural.
+        /// </summary>
         private static string NormalizeSuggestedQuestion(string line)
         {
             var cleaned = line.Trim();
-            cleaned = Regex.Replace(cleaned, @"^[-*•\s]+", string.Empty);
+            cleaned = Regex.Replace(cleaned, @"^[-*\s]+", string.Empty);
             cleaned = Regex.Replace(cleaned, @"^\d+[\).\-:\s]+", string.Empty);
             return cleaned.Trim();
         }
 
+        /// <summary>
+        /// Gera perguntas padrao para o caso de a IA nao devolver sugestoes.
+        /// </summary>
         private static List<string> GetFallbackQuestions(ChatSession sessao)
         {
             var subject = string.IsNullOrWhiteSpace(sessao.DocumentName)
@@ -674,81 +449,40 @@ namespace ChatbotAPI.Services
 
             return new List<string>
             {
-                $"Qual é o objetivo principal de {subject}?",
+                $"Qual e o objetivo principal de {subject}?",
                 $"Quais pontos mais importantes eu devo entender em {subject}?",
-                $"Que informações de {subject} merecem atenção especial?"
+                $"Que informacoes de {subject} merecem atencao especial?"
             };
         }
 
+        /// <summary>
+        /// Tenta gerar o markdown do resumo via Gemini e usa um resumo local se necessario.
+        /// </summary>
         private async Task<string> GenerateSummaryMarkdownAsync(ChatSession sessao, IReadOnlyList<ChatMessage> historico)
         {
             var transcript = BuildConversationTranscript(historico);
-            if (string.IsNullOrWhiteSpace(_geminiOptions.ApiKey) || string.IsNullOrWhiteSpace(transcript))
+            if (!_geminiClient.IsConfigured || string.IsNullOrWhiteSpace(transcript))
             {
                 return BuildFallbackSummaryMarkdown(sessao, historico);
             }
 
-            var prompt =
-                "Você vai resumir uma conversa sobre um documento. Gere um resumo executivo em português, usando markdown simples e SOMENTE esta estrutura: \n" +
-                "# Resumo Executivo\n" +
-                "## Contexto\n" +
-                "## Pontos principais\n" +
-                "- ...\n" +
-                "## Conclusão\n" +
-                "## Próximos passos\n" +
-                "- ...\n\n" +
-                "Regras: seja objetivo, não invente informações, use frases curtas e claras.\n\n" +
-                $"Documento: {sessao.DocumentName ?? "Documento sem nome"}\n\n" +
-                $"Conversa:\n{transcript}";
+            var documentName = sessao.DocumentName ?? "Documento sem nome";
+            var result = await _geminiClient.GenerateSummaryAsync(documentName, transcript);
 
-            var payload = new
-            {
-                contents = new[]
-                {
-                    new
-                    {
-                        role = "user",
-                        parts = new[] { new { text = prompt } }
-                    }
-                },
-                generationConfig = new { temperature = 0.25 }
-            };
-
-            try
-            {
-                string url = $"{_geminiOptions.BaseUrl}/{_geminiOptions.Model}:generateContent?key={_geminiOptions.ApiKey}";
-
-                using var httpClient = new HttpClient();
-                var jsonEnviado = JsonSerializer.Serialize(payload);
-                var content = new StringContent(jsonEnviado, Encoding.UTF8, "application/json");
-
-                var response = await httpClient.PostAsync(url, content);
-                var jsonRetornado = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    return BuildFallbackSummaryMarkdown(sessao, historico);
-                }
-
-                using var doc = JsonDocument.Parse(jsonRetornado);
-                var rawText = doc.RootElement
-                    .GetProperty("candidates")[0]
-                    .GetProperty("content")
-                    .GetProperty("parts")[0]
-                    .GetProperty("text")
-                    .GetString();
-
-                var normalized = NormalizeSummaryMarkdown(rawText ?? string.Empty);
-                return string.IsNullOrWhiteSpace(normalized)
-                    ? BuildFallbackSummaryMarkdown(sessao, historico)
-                    : normalized;
-            }
-            catch
+            if (!result.Success || string.IsNullOrWhiteSpace(result.Text))
             {
                 return BuildFallbackSummaryMarkdown(sessao, historico);
             }
+
+            var normalized = NormalizeSummaryMarkdown(result.Text);
+            return string.IsNullOrWhiteSpace(normalized)
+                ? BuildFallbackSummaryMarkdown(sessao, historico)
+                : normalized;
         }
 
+        /// <summary>
+        /// Converte o historico de mensagens em um texto linear para resumir depois.
+        /// </summary>
         private static string BuildConversationTranscript(IReadOnlyList<ChatMessage> historico)
         {
             if (historico.Count == 0)
@@ -759,7 +493,7 @@ namespace ChatbotAPI.Services
             var transcript = new StringBuilder();
             foreach (var message in historico)
             {
-                var label = message.Role == "User" ? "Usuário" : message.Role == "Assistant" ? "Assistente" : message.Role;
+                var label = message.Role == "User" ? "Usuario" : message.Role == "Assistant" ? "Assistente" : message.Role;
                 transcript.AppendLine($"{label}: {message.Content}");
                 transcript.AppendLine();
             }
@@ -769,6 +503,9 @@ namespace ChatbotAPI.Services
             return text.Length <= maxTranscriptChars ? text : text[..maxTranscriptChars];
         }
 
+        /// <summary>
+        /// Monta a linha de apoio exibida abaixo do titulo no PDF.
+        /// </summary>
         private static string BuildSummarySubtitle(ChatSession sessao, int messageCount)
         {
             var documentLabel = string.IsNullOrWhiteSpace(sessao.DocumentName)
@@ -778,6 +515,9 @@ namespace ChatbotAPI.Services
             return $"Documento: {documentLabel} | Mensagens na conversa: {messageCount}";
         }
 
+        /// <summary>
+        /// Gera um nome de arquivo seguro para o PDF exportado.
+        /// </summary>
         private static string BuildSummaryFileName(ChatSession sessao)
         {
             var baseName = string.IsNullOrWhiteSpace(sessao.DocumentName)
@@ -789,6 +529,9 @@ namespace ChatbotAPI.Services
             return $"{safeName}-resumo.pdf";
         }
 
+        /// <summary>
+        /// Garante que o markdown final tenha pelo menos a estrutura basica esperada.
+        /// </summary>
         private static string NormalizeSummaryMarkdown(string rawText)
         {
             var text = rawText.Trim();
@@ -805,15 +548,18 @@ namespace ChatbotAPI.Services
             return text;
         }
 
+        /// <summary>
+        /// Cria um resumo simples local quando a IA nao estiver disponivel.
+        /// </summary>
         private static string BuildFallbackSummaryMarkdown(ChatSession sessao, IReadOnlyList<ChatMessage> historico)
         {
             var documentLabel = string.IsNullOrWhiteSpace(sessao.DocumentName)
-                ? "Documento não informado"
+                ? "Documento nao informado"
                 : sessao.DocumentName;
 
             var recentMessages = historico
                 .TakeLast(8)
-                .Select(message => $"- {(message.Role == "User" ? "Usuário" : "Assistente")}: {message.Content}")
+                .Select(message => $"- {(message.Role == "User" ? "Usuario" : "Assistente")}: {message.Content}")
                 .ToList();
 
             return string.Join("\n", new[]
@@ -822,12 +568,12 @@ namespace ChatbotAPI.Services
                 "## Contexto",
                 $"Conversa baseada em {documentLabel}.",
                 "## Pontos principais",
-                recentMessages.Count > 0 ? string.Join("\n", recentMessages) : "- Não há mensagens suficientes para extrair pontos principais.",
-                "## Conclusão",
-                "O assistente analisou o conteúdo da conversa e consolidou os pontos discutidos.",
-                "## Próximos passos",
+                recentMessages.Count > 0 ? string.Join("\n", recentMessages) : "- Nao ha mensagens suficientes para extrair pontos principais.",
+                "## Conclusao",
+                "O assistente analisou o conteudo da conversa e consolidou os pontos discutidos.",
+                "## Proximos passos",
                 "- Revisar os pontos principais no documento.",
-                "- Validar eventuais dúvidas que ainda ficaram em aberto.",
+                "- Validar eventuais duvidas que ainda ficaram em aberto.",
             });
         }
     }
